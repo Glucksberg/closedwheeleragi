@@ -1,0 +1,71 @@
+{
+  "_comment": "Configuration template for ClosedWheelerAGI",
+  "_comment_security": "IMPORTANT: Never commit API keys! Use environment variables instead (see .env.example)",
+
+  "api_base_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "model": "gpt-4o-mini",
+
+  "_comment_behavior": "Advanced LLM tuning (Optional)",
+  "_comment_temperature": "Range 0.0 to 2.0. (Default: 1.0 or provider-specific)",
+  "_comment_top_p": "Nucleus sampling. (Default: 1.0)",
+  "_comment_max_tokens": "Limit response size. (Default: No limit or model-specific)",
+  
+  "max_context_size": 128000,
+  
+  "memory": {
+    "max_short_term_items": 20,
+    "max_working_items": 50,
+    "max_long_term_items": 100,
+    "compression_trigger": 15,
+    "storage_path": ".agi/memory.json"
+  },
+
+  "min_confidence_score": 0.7,
+  "max_files_per_batch": 10,
+  "backup_enabled": true,
+  "backup_path": ".agi/backups",
+
+  "run_tests_before_apply": true,
+  "test_command": "go test ./...",
+
+  "enable_code_metrics": true,
+  "enable_security_analysis": true,
+  "enable_performance_check": true,
+
+  "ui": {
+    "theme": "dark",
+    "show_tokens": true,
+    "show_timestamp": true,
+    "verbose": false
+  },
+
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": 0,
+    "notify_on_tool_start": true
+  },
+
+  "_comment_permissions": "Global permissions and access control",
+  "permissions": {
+    "allowed_commands": ["*"],
+    "allowed_tools": ["*"],
+    "sensitive_tools": [
+      "git_commit",
+      "git_push",
+      "git_checkpoint",
+      "exec_command",
+      "write_file",
+      "delete_file",
+      "rollback_edits",
+      "complete_edit",
+      "install_skill"
+    ],
+    "auto_approve_non_sensitive": false,
+    "require_approval_for_all": false,
+    "telegram_approval_timeout": 300,
+    "enable_audit_log": true,
+    "audit_log_path": ".agi/audit.log"
+  }
+}

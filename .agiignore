@@ -1,0 +1,41 @@
+# Coder AGI Ignore File
+# Files and directories matching these patterns will be ignored
+# Supports glob patterns
+
+# Version control
+.git/
+
+# Dependencies
+vendor/
+node_modules/
+
+# Coder AGI data
+.agi/
+
+# Build outputs
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE/Editor
+.idea/
+.vscode/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files (optional, remove if you want to include tests)
+# *_test.go
+# *.test
