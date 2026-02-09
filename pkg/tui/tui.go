@@ -342,7 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.updateViewport()
-		return m, tea.EnableMouseCellMotion
+		return m, nil
 
 	case spinner.TickMsg:
 		if m.loading {
@@ -732,7 +732,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 
 	case "/login":
 		m.initLogin()
-		return m, tea.DisableMouse
+		return m, nil
 
 	case "/exit", "/q":
 		return m, tea.Quit
@@ -958,7 +958,6 @@ func openBrowser(url string) {
 func Run(ag *agent.Agent, ctx ...context.Context) error {
 	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 		tea.WithFilter(quitKeyFilter()),
 	}
 	if len(ctx) > 0 && ctx[0] != nil {

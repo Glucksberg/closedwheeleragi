@@ -88,7 +88,7 @@ func (m Model) loginUpdate(msg tea.KeyMsg) (Model, tea.Cmd) {
 			Timestamp: time.Now(),
 		})
 		m.updateViewport()
-		return m, tea.EnableMouseCellMotion
+		return m, nil
 	}
 
 	switch m.loginStep {
@@ -143,7 +143,7 @@ func (m Model) loginUpdatePickProvider(msg tea.KeyMsg) (Model, tea.Cmd) {
 				Timestamp: time.Now(),
 			})
 			m.updateViewport()
-			return m, tea.EnableMouseCellMotion
+			return m, nil
 		default:
 			m.closeLogin()
 			m.messages = append(m.messages, Message{
@@ -152,7 +152,7 @@ func (m Model) loginUpdatePickProvider(msg tea.KeyMsg) (Model, tea.Cmd) {
 				Timestamp: time.Now(),
 			})
 			m.updateViewport()
-			return m, tea.EnableMouseCellMotion
+			return m, nil
 		}
 	}
 	return m, nil
@@ -190,7 +190,7 @@ func (m Model) startAnthropicLogin() (Model, tea.Cmd) {
 	ti.Focus()
 	m.loginInput = ti
 	m.updateViewport()
-	return m, tea.Batch(textinput.Blink, tea.DisableMouse)
+	return m, textinput.Blink
 }
 
 func (m Model) loginUpdateAnthropicPaste(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -218,7 +218,7 @@ func (m Model) loginUpdateAnthropicPaste(msg tea.KeyMsg) (Model, tea.Cmd) {
 			})
 		}
 		m.updateViewport()
-		return m, tea.EnableMouseCellMotion
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -284,7 +284,7 @@ func (m Model) startOpenAILogin() (Model, tea.Cmd) {
 		}
 	}
 
-	return m, tea.Batch(tea.Cmd(waitCmd), tea.DisableMouse)
+	return m, tea.Cmd(waitCmd)
 }
 
 func (m Model) loginUpdateOpenAIPaste(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -324,7 +324,7 @@ func (m Model) loginUpdateOpenAIPaste(msg tea.KeyMsg) (Model, tea.Cmd) {
 			})
 		}
 		m.updateViewport()
-		return m, tea.EnableMouseCellMotion
+		return m, nil
 	}
 
 	var cmd tea.Cmd
