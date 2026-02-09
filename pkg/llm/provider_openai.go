@@ -49,6 +49,11 @@ func (p *OpenAIProvider) SetHeaders(req *http.Request, apiKey string) {
 	// OAuth Bearer token takes priority over API key
 	if p.oauth != nil && p.oauth.AccessToken != "" && !p.oauth.IsExpired() {
 		req.Header.Set("Authorization", "Bearer "+p.oauth.AccessToken)
+		// ChatGPT subscription OAuth requires additional headers
+		if p.oauth.AccountID != "" {
+			req.Header.Set("ChatGPT-Account-Id", p.oauth.AccountID)
+		}
+		req.Header.Set("originator", "codex_cli_rs")
 	} else {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
