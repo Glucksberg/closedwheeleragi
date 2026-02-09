@@ -181,6 +181,7 @@ type Model struct {
 	// OAuth login state
 	loginActive   bool
 	loginVerifier string
+	loginAuthURL  string
 	loginInput    textinput.Model
 }
 
@@ -720,8 +721,12 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		// Try to open browser
 		openBrowser(authURL)
 
+		// Save URL to file so user can access it from another terminal
+		os.WriteFile(".agi/login-url.txt", []byte(authURL+"\n"), 0600)
+
 		m.loginActive = true
 		m.loginVerifier = verifier
+		m.loginAuthURL = authURL
 
 		ti := textinput.New()
 		ti.Placeholder = "Paste the authorization code (code#state)..."
@@ -736,7 +741,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			Timestamp: time.Now(),
 		})
 		m.updateViewport()
-		return m, textinput.Blink
+		// Disable mouse so user can select/copy the URL
+		return m, tea.Batch(textinput.Blink, tea.DisableMouse)
 
 	case "/exit", "/q":
 		return m, tea.Quit
@@ -948,7 +954,7 @@ func (m Model) loginUpdate(msg tea.KeyMsg) (Model, tea.Cmd) {
 			Timestamp: time.Now(),
 		})
 		m.updateViewport()
-		return m, nil
+		return m, tea.EnableMouseCellMotion
 	}
 
 	if msg.Type == tea.KeyEnter {
@@ -973,7 +979,7 @@ func (m Model) loginUpdate(msg tea.KeyMsg) (Model, tea.Cmd) {
 			})
 		}
 		m.updateViewport()
-		return m, nil
+		return m, tea.EnableMouseCellMotion
 	}
 
 	var cmd tea.Cmd
@@ -991,8 +997,12 @@ func (m Model) loginView() string {
 
 	s.WriteString(pickerTitleStyle.Render("🔑 Anthropic OAuth Login"))
 	s.WriteString("\n\n")
-	s.WriteString(pickerSubtitleStyle.Render("A browser window should have opened for authorization."))
-	s.WriteString("\n")
+	s.WriteString(pickerSubtitleStyle.Render("Open this URL in your browser to authorize:"))
+	s.WriteString("\n\n")
+	s.WriteString(lipgloss.NewStyle().Foreground(secondaryColor).Render(m.loginAuthURL))
+	s.WriteString("\n\n")
+	s.WriteString(pickerHintStyle.Render("  Or from another terminal: cat .agi/login-url.txt"))
+	s.WriteString("\n\n")
 	s.WriteString(pickerSubtitleStyle.Render("After authorizing, paste the code below:"))
 	s.WriteString("\n\n")
 	s.WriteString(m.loginInput.View())
