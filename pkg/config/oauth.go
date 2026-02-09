@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// OAuthCredentials holds OAuth 2.0 tokens for Anthropic.
+// OAuthCredentials holds OAuth 2.0 tokens for a provider.
 type OAuthCredentials struct {
 	Provider     string `json:"provider"`
 	AccessToken  string `json:"access_token"`
@@ -49,9 +49,10 @@ func oauthPath() string {
 	return filepath.Join(".agi", "oauth.json")
 }
 
-// LoadOAuth loads OAuth credentials from .agi/oauth.json.
+// LoadAllOAuth loads all OAuth credentials from .agi/oauth.json.
 // Returns nil (no error) if the file doesn't exist.
-func LoadOAuth() (*OAuthCredentials, error) {
+// Supports both legacy (single cred) and new (multi-provider map) format.
+func LoadAllOAuth() (map[string]*OAuthCredentials, error) {
 	data, err := os.ReadFile(oauthPath())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -60,21 +61,58 @@ func LoadOAuth() (*OAuthCredentials, error) {
 		return nil, err
 	}
 
+	// Try new format first: {"anthropic": {...}, "openai": {...}}
+	var store map[string]*OAuthCredentials
+	if err := json.Unmarshal(data, &store); err == nil {
+		// Verify it's actually a map and not a flat object parsed as map.
+		// A flat OAuthCredentials has "access_token" at top level, a store does not.
+		if _, isFlat := store["access_token"]; !isFlat && len(store) > 0 {
+			return store, nil
+		}
+	}
+
+	// Fall back to legacy format: single OAuthCredentials object
 	var creds OAuthCredentials
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return nil, err
 	}
-	return &creds, nil
+	if creds.AccessToken == "" {
+		return nil, nil
+	}
+
+	provider := creds.Provider
+	if provider == "" {
+		provider = "anthropic"
+	}
+	return map[string]*OAuthCredentials{provider: &creds}, nil
 }
 
-// SaveOAuth saves OAuth credentials to .agi/oauth.json.
-func SaveOAuth(creds *OAuthCredentials) error {
+// SaveAllOAuth saves all OAuth credentials to .agi/oauth.json.
+func SaveAllOAuth(store map[string]*OAuthCredentials) error {
 	if err := os.MkdirAll(".agi", 0755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(creds, "", "  ")
+	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(oauthPath(), data, 0600)
+}
+
+// SaveOAuth saves a single provider's OAuth credentials.
+// Merges into the existing store so other providers are preserved.
+func SaveOAuth(creds *OAuthCredentials) error {
+	store, err := LoadAllOAuth()
+	if err != nil {
+		store = make(map[string]*OAuthCredentials)
+	}
+	if store == nil {
+		store = make(map[string]*OAuthCredentials)
+	}
+	provider := creds.Provider
+	if provider == "" {
+		provider = "anthropic"
+	}
+	store[provider] = creds
+	return SaveAllOAuth(store)
 }

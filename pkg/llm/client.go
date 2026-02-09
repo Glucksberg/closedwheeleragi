@@ -138,17 +138,23 @@ func (c *Client) SetFallbackModels(models []string, timeoutSeconds int) {
 }
 
 // SetOAuthCredentials sets OAuth credentials on the underlying provider.
-// Only has effect when the provider is Anthropic.
+// Supports both Anthropic and OpenAI providers.
 func (c *Client) SetOAuthCredentials(creds *config.OAuthCredentials) {
-	if ap, ok := c.provider.(*AnthropicProvider); ok {
-		ap.SetOAuth(creds)
+	switch p := c.provider.(type) {
+	case *AnthropicProvider:
+		p.SetOAuth(creds)
+	case *OpenAIProvider:
+		p.SetOAuth(creds)
 	}
 }
 
 // GetOAuthCredentials returns the current OAuth credentials from the provider.
 func (c *Client) GetOAuthCredentials() *config.OAuthCredentials {
-	if ap, ok := c.provider.(*AnthropicProvider); ok {
-		return ap.GetOAuth()
+	switch p := c.provider.(type) {
+	case *AnthropicProvider:
+		return p.GetOAuth()
+	case *OpenAIProvider:
+		return p.GetOAuth()
 	}
 	return nil
 }
@@ -156,8 +162,11 @@ func (c *Client) GetOAuthCredentials() *config.OAuthCredentials {
 // RefreshOAuthIfNeeded refreshes OAuth token if it's close to expiry.
 // Called once before the request loop, not inside SetHeaders.
 func (c *Client) RefreshOAuthIfNeeded() {
-	if ap, ok := c.provider.(*AnthropicProvider); ok {
-		ap.RefreshIfNeeded()
+	switch p := c.provider.(type) {
+	case *AnthropicProvider:
+		p.RefreshIfNeeded()
+	case *OpenAIProvider:
+		p.RefreshIfNeeded()
 	}
 }
 

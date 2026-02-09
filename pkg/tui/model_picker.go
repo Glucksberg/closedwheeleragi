@@ -216,8 +216,16 @@ func (m Model) pickerUpdateProvider(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 		m.pickerNewURL = selected.BaseURL
 
-		// If Anthropic is selected and OAuth is active, skip API key step
-		if selected.Provider == "anthropic" && m.agent.HasOAuth() {
+		// If OAuth is active for this specific provider+endpoint, skip API key step
+		// Only skip for the actual OAuth provider (Anthropic API, OpenAI API), not for
+		// other providers that share the "openai" protocol (DeepSeek, Gemini, Ollama).
+		oauthSkip := false
+		if selected.Label == "Anthropic" && m.agent.HasOAuthFor("anthropic") {
+			oauthSkip = true
+		} else if selected.Label == "OpenAI" && m.agent.HasOAuthFor("openai") {
+			oauthSkip = true
+		}
+		if oauthSkip {
 			m.pickerNewKey = m.agent.Config().APIKey
 			m.pickerStep = pickerStepModel
 			m.pickerCursor = 0
@@ -447,9 +455,11 @@ func (m Model) pickerViewProvider() string {
 			hint = fmt.Sprintf(" (%d models)", len(models))
 		}
 
-		// Show OAuth status for Anthropic
-		if p.Provider == "anthropic" && m.agent.HasOAuth() {
-			hint += " [OAuth: " + m.agent.GetOAuthExpiry() + "]"
+		// Show OAuth status only for actual OAuth providers
+		if p.Label == "Anthropic" || p.Label == "OpenAI" {
+			if oauthExpiry := m.agent.GetOAuthExpiryFor(p.Provider); oauthExpiry != "" {
+				hint += " [OAuth: " + oauthExpiry + "]"
+			}
 		}
 
 		line := style.Render(cursor+label) + pickerHintStyle.Render(hint)

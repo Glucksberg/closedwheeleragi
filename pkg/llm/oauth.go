@@ -68,23 +68,25 @@ func ExchangeCode(authCode, verifier string) (*config.OAuthCredentials, error) {
 	parts := strings.SplitN(authCode, "#", 2)
 	code := parts[0]
 	state := ""
-	if len(parts) == 2 {
+	if len(parts) > 1 {
 		state = parts[1]
 	}
 
-	body, err := json.Marshal(map[string]string{
+	// Match reference JS implementation exactly: JSON with state
+	body := map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     OAuthClientID,
 		"code":          code,
 		"state":         state,
 		"redirect_uri":  OAuthRedirectURI,
 		"code_verifier": verifier,
-	})
+	}
+	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal token request: %w", err)
 	}
 
-	resp, err := oauthHTTPClient.Post(OAuthTokenURL, "application/json", strings.NewReader(string(body)))
+	resp, err := oauthHTTPClient.Post(OAuthTokenURL, "application/json", strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}

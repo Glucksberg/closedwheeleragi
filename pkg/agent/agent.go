@@ -66,23 +66,24 @@ type Agent struct {
 
 // NewAgent creates a new agent instance
 func NewAgent(cfg *config.Config, projectPath string, appPath string) (*Agent, error) {
-	// Load OAuth credentials — if present, API key is not required
-	oauthCreds, oauthErr := config.LoadOAuth()
+	// Load all OAuth credentials — if any present, API key is not required
+	oauthStore, oauthErr := config.LoadAllOAuth()
 	if oauthErr != nil {
-		// Log but don't fail — OAuth is optional
 		fmt.Printf("[WARN] Failed to load OAuth credentials: %v\n", oauthErr)
 	}
+	hasAnyOAuth := len(oauthStore) > 0
 
-	if cfg.APIKey == "" && oauthCreds == nil {
+	if cfg.APIKey == "" && !hasAnyOAuth {
 		return nil, fmt.Errorf("API key is required (or use /login for OAuth)")
 	}
 
 	// Initialize LLM client with provider support
 	llmClient := llm.NewClientWithProvider(cfg.APIBaseURL, cfg.APIKey, cfg.Model, cfg.Provider)
 
-	// Wire in OAuth credentials if available
-	if oauthCreds != nil {
-		llmClient.SetOAuthCredentials(oauthCreds)
+	// Wire in OAuth credentials for the active provider
+	providerName := llmClient.ProviderName()
+	if creds, ok := oauthStore[providerName]; ok && creds != nil {
+		llmClient.SetOAuthCredentials(creds)
 	}
 
 	// Configure fallback models if specified
@@ -911,16 +912,17 @@ func (a *Agent) SwitchModel(provider, baseURL, apiKey, model string) error {
 	origModel := a.config.Model
 	origLLM := a.llm
 
-	// Preserve OAuth credentials across model switch
-	existingOAuth := a.llm.GetOAuthCredentials()
-
 	a.config.Provider = provider
 	a.config.APIBaseURL = baseURL
 	a.config.APIKey = apiKey
 	a.config.Model = model
 	a.llm = llm.NewClientWithProvider(baseURL, apiKey, model, provider)
-	if existingOAuth != nil {
-		a.llm.SetOAuthCredentials(existingOAuth)
+
+	// Load OAuth credentials for the new provider
+	oauthStore, _ := config.LoadAllOAuth()
+	newProviderName := a.llm.ProviderName()
+	if creds, ok := oauthStore[newProviderName]; ok && creds != nil {
+		a.llm.SetOAuthCredentials(creds)
 	}
 	if len(a.config.FallbackModels) > 0 {
 		a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)
@@ -941,13 +943,25 @@ func (a *Agent) SwitchModel(provider, baseURL, apiKey, model string) error {
 }
 
 // LoginOAuth exchanges an authorization code for OAuth tokens and configures the client.
-func (a *Agent) LoginOAuth(authCode, verifier string) error {
-	creds, err := llm.ExchangeCode(authCode, verifier)
+// provider should be "anthropic" or "openai".
+func (a *Agent) LoginOAuth(provider, authCode, verifier string) error {
+	var creds *config.OAuthCredentials
+	var err error
+
+	switch provider {
+	case "anthropic":
+		creds, err = llm.ExchangeCode(authCode, verifier)
+	case "openai":
+		creds, err = llm.ExchangeOpenAICode(authCode, verifier)
+	default:
+		return fmt.Errorf("unsupported OAuth provider: %s", provider)
+	}
+
 	if err != nil {
 		return fmt.Errorf("OAuth token exchange failed: %w", err)
 	}
 
-	// Save to disk
+	// Save to disk (merges into store, preserving other providers)
 	if err := config.SaveOAuth(creds); err != nil {
 		return fmt.Errorf("failed to save OAuth credentials: %w", err)
 	}
@@ -955,21 +969,47 @@ func (a *Agent) LoginOAuth(authCode, verifier string) error {
 	// Wire into current LLM client
 	a.llm.SetOAuthCredentials(creds)
 
-	a.logger.Info("OAuth login successful, token expires in %v", creds.ExpiresIn())
+	a.logger.Info("OAuth login (%s) successful, token expires in %v", provider, creds.ExpiresIn())
 	return nil
 }
 
-// HasOAuth returns true if the agent has active OAuth credentials.
+// HasOAuth returns true if the agent has active OAuth credentials for current provider.
 func (a *Agent) HasOAuth() bool {
 	creds := a.llm.GetOAuthCredentials()
 	return creds != nil && creds.AccessToken != ""
 }
 
-// GetOAuthExpiry returns the OAuth token expiry info.
+// HasOAuthFor returns true if stored OAuth credentials exist for the given provider.
+func (a *Agent) HasOAuthFor(provider string) bool {
+	store, err := config.LoadAllOAuth()
+	if err != nil || store == nil {
+		return false
+	}
+	creds := store[provider]
+	return creds != nil && creds.AccessToken != "" && !creds.IsExpired()
+}
+
+// GetOAuthExpiry returns the OAuth token expiry info for current provider.
 func (a *Agent) GetOAuthExpiry() string {
 	creds := a.llm.GetOAuthCredentials()
 	if creds == nil {
 		return "no OAuth credentials"
+	}
+	if creds.IsExpired() {
+		return "expired"
+	}
+	return fmt.Sprintf("expires in %v", creds.ExpiresIn().Round(time.Minute))
+}
+
+// GetOAuthExpiryFor returns the OAuth token expiry info for a specific provider.
+func (a *Agent) GetOAuthExpiryFor(provider string) string {
+	store, err := config.LoadAllOAuth()
+	if err != nil || store == nil {
+		return ""
+	}
+	creds := store[provider]
+	if creds == nil {
+		return ""
 	}
 	if creds.IsExpired() {
 		return "expired"
@@ -1185,9 +1225,11 @@ The AGI has full access to the project and can execute tools as configured in pe
 
 								// Recreate LLM client with new settings
 								a.llm = llm.NewClientWithProvider(a.config.APIBaseURL, a.config.APIKey, a.config.Model, a.config.Provider)
-								// Re-attach OAuth credentials if available
-								if oauthCreds, _ := config.LoadOAuth(); oauthCreds != nil {
-									a.llm.SetOAuthCredentials(oauthCreds)
+								// Re-attach OAuth credentials for the active provider
+								if oauthStore, _ := config.LoadAllOAuth(); oauthStore != nil {
+									if creds, ok := oauthStore[a.llm.ProviderName()]; ok && creds != nil {
+										a.llm.SetOAuthCredentials(creds)
+									}
 								}
 								if len(a.config.FallbackModels) > 0 {
 									a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)

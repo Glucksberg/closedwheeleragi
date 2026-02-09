@@ -10,12 +10,35 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"ClosedWheeler/pkg/config"
 )
 
 // OpenAIProvider implements the Provider interface for OpenAI-compatible APIs.
-type OpenAIProvider struct{}
+type OpenAIProvider struct {
+	oauth *config.OAuthCredentials
+}
 
 func (p *OpenAIProvider) Name() string { return "openai" }
+
+// SetOAuth sets OAuth credentials for the OpenAI provider.
+func (p *OpenAIProvider) SetOAuth(creds *config.OAuthCredentials) { p.oauth = creds }
+
+// GetOAuth returns the current OAuth credentials.
+func (p *OpenAIProvider) GetOAuth() *config.OAuthCredentials { return p.oauth }
+
+// RefreshIfNeeded refreshes the OAuth token if it's close to expiry.
+func (p *OpenAIProvider) RefreshIfNeeded() {
+	if p.oauth == nil || !p.oauth.NeedsRefresh() || p.oauth.RefreshToken == "" {
+		return
+	}
+	newCreds, err := RefreshOpenAIToken(p.oauth.RefreshToken)
+	if err != nil {
+		return
+	}
+	p.oauth = newCreds
+	_ = config.SaveOAuth(newCreds)
+}
 
 func (p *OpenAIProvider) Endpoint(baseURL string) string {
 	return baseURL + "/chat/completions"
@@ -23,7 +46,12 @@ func (p *OpenAIProvider) Endpoint(baseURL string) string {
 
 func (p *OpenAIProvider) SetHeaders(req *http.Request, apiKey string) {
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	// OAuth Bearer token takes priority over API key
+	if p.oauth != nil && p.oauth.AccessToken != "" && !p.oauth.IsExpired() {
+		req.Header.Set("Authorization", "Bearer "+p.oauth.AccessToken)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 }
 
 func (p *OpenAIProvider) BuildRequestBody(model string, messages []Message, tools []ToolDefinition, temperature *float64, topP *float64, maxTokens *int, stream bool) ([]byte, error) {

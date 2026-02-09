@@ -179,9 +179,14 @@ type Model struct {
 
 	// OAuth login state
 	loginActive   bool
+	loginStep     int
+	loginCursor   int
+	loginProvider string
 	loginVerifier string
 	loginAuthURL  string
 	loginInput    textinput.Model
+	loginCancel    context.CancelFunc
+	loginClipboard bool
 }
 
 // NewModel creates a new TUI model
@@ -315,6 +320,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateViewport()
 		}
 		return m, nil
+
+	case oauthExchangeMsg:
+		// OpenAI OAuth callback completed (async)
+		m.closeLogin()
+		if msg.err != nil {
+			m.messages = append(m.messages, Message{
+				Role:      "error",
+				Content:   fmt.Sprintf("%s OAuth login failed: %v", msg.provider, msg.err),
+				Timestamp: time.Now(),
+			})
+		} else {
+			providerLabel := msg.provider
+			if providerLabel == "openai" {
+				providerLabel = "OpenAI"
+			}
+			m.messages = append(m.messages, Message{
+				Role:      "system",
+				Content:   fmt.Sprintf("%s OAuth login successful! You can now use %s models.", providerLabel, providerLabel),
+				Timestamp: time.Now(),
+			})
+		}
+		m.updateViewport()
+		return m, tea.EnableMouseCellMotion
 
 	case spinner.TickMsg:
 		if m.loading {
@@ -543,7 +571,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			Role: "system",
 			Content: `📚 Commands:
   /help, /h     - Show this help
-  /login        - Anthropic OAuth login (Claude Pro/Max)
+  /login        - OAuth login (Anthropic, OpenAI)
   /model        - Switch provider & model (interactive)
   /model <name> - Quick switch to a model
   /clear, /c    - Clear conversation
@@ -703,13 +731,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/login":
-		m.messages = append(m.messages, Message{
-			Role:      "system",
-			Content:   "Use ./ClosedWheeler -login from the terminal for OAuth login.\nThe TUI login is not reliable on remote servers.",
-			Timestamp: time.Now(),
-		})
-		m.updateViewport()
-		return m, nil
+		m.initLogin()
+		return m, tea.DisableMouse
 
 	case "/exit", "/q":
 		return m, tea.Quit
@@ -911,78 +934,7 @@ func quitKeyFilter() func(tea.Model, tea.Msg) tea.Msg {
 	}
 }
 
-// loginUpdate handles key events during OAuth login flow.
-func (m Model) loginUpdate(msg tea.KeyMsg) (Model, tea.Cmd) {
-	if msg.Type == tea.KeyEsc {
-		m.loginActive = false
-		m.messages = append(m.messages, Message{
-			Role:      "system",
-			Content:   "OAuth login cancelled.",
-			Timestamp: time.Now(),
-		})
-		m.updateViewport()
-		return m, tea.EnableMouseCellMotion
-	}
-
-	if msg.Type == tea.KeyEnter {
-		code := strings.TrimSpace(m.loginInput.Value())
-		if code == "" {
-			return m, nil
-		}
-
-		m.loginActive = false
-		err := m.agent.LoginOAuth(code, m.loginVerifier)
-		if err != nil {
-			m.messages = append(m.messages, Message{
-				Role:      "error",
-				Content:   fmt.Sprintf("OAuth login failed: %v", err),
-				Timestamp: time.Now(),
-			})
-		} else {
-			m.messages = append(m.messages, Message{
-				Role:      "system",
-				Content:   fmt.Sprintf("OAuth login successful! Token %s.\nYou can now use Anthropic models.", m.agent.GetOAuthExpiry()),
-				Timestamp: time.Now(),
-			})
-		}
-		m.updateViewport()
-		return m, tea.EnableMouseCellMotion
-	}
-
-	var cmd tea.Cmd
-	m.loginInput, cmd = m.loginInput.Update(msg)
-	return m, cmd
-}
-
-// loginView renders the OAuth login overlay.
-func (m Model) loginView() string {
-	var s strings.Builder
-	boxWidth := m.width - 6
-	if boxWidth < 20 {
-		boxWidth = 20
-	}
-
-	s.WriteString(pickerTitleStyle.Render("🔑 Anthropic OAuth Login"))
-	s.WriteString("\n\n")
-	s.WriteString(pickerSubtitleStyle.Render("To authorize, download and open the HTML file locally:"))
-	s.WriteString("\n\n")
-	s.WriteString("  scp <this-server>:.agi/login.html /tmp/ && open /tmp/login.html")
-	s.WriteString("\n\n")
-	s.WriteString(pickerSubtitleStyle.Render("Or copy the raw URL (careful with line wrapping):"))
-	s.WriteString("\n\n")
-	s.WriteString("  cat .agi/login-url.txt")
-	s.WriteString("\n\n")
-	s.WriteString(pickerSubtitleStyle.Render("After authorizing, paste the code below:"))
-	s.WriteString("\n\n")
-	s.WriteString(m.loginInput.View())
-	s.WriteString("\n\n")
-	s.WriteString(pickerHintStyle.Render("  The code format is: code#state"))
-	s.WriteString("\n")
-	s.WriteString(pickerHintStyle.Render("  Press Enter to submit · Esc to cancel"))
-	s.WriteString("\n")
-
-	return pickerBoxStyle.Width(boxWidth).Render(s.String())
-}
+// NOTE: loginUpdate() and loginView() are now in login_picker.go
 
 // openBrowser attempts to open a URL in the default browser.
 func openBrowser(url string) {
