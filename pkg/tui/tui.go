@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -222,18 +223,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Quit keys — checked first, always active regardless of state
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyCtrlBackslash:
+			return m, tea.Quit
+		}
+
 		// Model picker intercepts all keys when active
 		if m.pickerActive {
-			if msg.Type == tea.KeyCtrlC {
-				return m, tea.Quit
-			}
 			updated, cmd := m.pickerUpdate(msg)
 			return updated, cmd
 		}
 
 		switch msg.Type {
-		case tea.KeyCtrlC:
-			m.agent.GetLogger().Info("TUI received quit key: %s", msg.String())
+		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 
 		case tea.KeyEnter:
@@ -430,7 +433,7 @@ func (m Model) View() string {
 	sb.WriteString("\n")
 
 	// Help bar
-	help := helpStyle.Render("Enter: Send │ /help: Commands │ /model: Switch Model │ Ctrl+C: Quit")
+	help := helpStyle.Render("Enter: Send │ /help: Commands │ /model: Switch Model │ Ctrl+C/D: Quit")
 	sb.WriteString(help)
 
 	return sb.String()
@@ -848,11 +851,37 @@ type statusUpdateMsg struct {
 	status string
 }
 
+// quitKeyFilter is a program-level filter that catches quit keys
+// even if the model's Update somehow doesn't process them.
+// It counts consecutive Ctrl+C presses and force-exits on the third.
+func quitKeyFilter() func(tea.Model, tea.Msg) tea.Msg {
+	ctrlCCount := 0
+	return func(m tea.Model, msg tea.Msg) tea.Msg {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.Type {
+			case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyCtrlBackslash:
+				ctrlCCount++
+				if ctrlCCount >= 3 {
+					// Nuclear option: force exit after 3 attempts
+					fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
+					fmt.Print("\033[?25h\033[?1049l")
+					fmt.Fprintln(os.Stderr, "\nForce quit.")
+					os.Exit(1)
+				}
+			default:
+				ctrlCCount = 0
+			}
+		}
+		return msg
+	}
+}
+
 // Run starts the TUI with an optional context for cancellation.
 func Run(ag *agent.Agent, ctx ...context.Context) error {
 	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
+		tea.WithFilter(quitKeyFilter()),
 	}
 	if len(ctx) > 0 && ctx[0] != nil {
 		opts = append(opts, tea.WithContext(ctx[0]))
