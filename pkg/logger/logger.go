@@ -14,11 +14,13 @@ type Level string
 const (
 	DEBUG Level = "DEBUG"
 	INFO  Level = "INFO"
+	WARN  Level = "WARN"
 	ERROR Level = "ERROR"
 )
 
 type Logger struct {
 	filePath string
+	verbose  bool // Print errors to console in verbose mode
 }
 
 func New(storagePath string) (*Logger, error) {
@@ -27,13 +29,20 @@ func New(storagePath string) (*Logger, error) {
 	}
 
 	logPath := filepath.Join(storagePath, "debug.log")
-	return &Logger{filePath: logPath}, nil
+	// Check environment variable for verbose mode
+	verbose := os.Getenv("VERBOSE") == "true" || os.Getenv("VERBOSE") == "1"
+	return &Logger{filePath: logPath, verbose: verbose}, nil
 }
 
 func (l *Logger) log(level Level, message string) {
 	message = sanitize(message)
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	entry := fmt.Sprintf("[%s] %s: %s\n", timestamp, level, message)
+
+	// Print to console if verbose mode enabled or if ERROR/WARN
+	if l.verbose || level == ERROR || level == WARN {
+		fmt.Fprint(os.Stderr, entry)
+	}
 
 	f, err := os.OpenFile(l.filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -53,6 +62,10 @@ func (l *Logger) Debug(format string, v ...any) {
 
 func (l *Logger) Info(format string, v ...any) {
 	l.log(INFO, fmt.Sprintf(format, v...))
+}
+
+func (l *Logger) Warn(format string, v ...any) {
+	l.log(WARN, fmt.Sprintf(format, v...))
 }
 
 func (l *Logger) Error(format string, v ...any) {

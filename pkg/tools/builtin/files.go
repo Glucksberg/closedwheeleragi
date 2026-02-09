@@ -35,7 +35,13 @@ func ReadFileTool(projectRoot string, auditor *security.Auditor) *tools.Tool {
 			Required: []string{"path"},
 		},
 		Handler: func(args map[string]any) (tools.ToolResult, error) {
-			path := args["path"].(string)
+			path, ok := args["path"].(string)
+			if !ok {
+				return tools.ToolResult{
+					Success: false,
+					Error:   "invalid path parameter: must be a string",
+				}, fmt.Errorf("path parameter must be a string, got %T", args["path"])
+			}
 			fullPath := filepath.Join(projectRoot, path)
 
 			// Security check using auditor
@@ -118,8 +124,22 @@ func WriteFileTool(projectRoot string, auditor *security.Auditor) *tools.Tool {
 			Required: []string{"path", "content"},
 		},
 		Handler: func(args map[string]any) (tools.ToolResult, error) {
-			path := args["path"].(string)
-			content := args["content"].(string)
+			path, ok := args["path"].(string)
+			if !ok {
+				return tools.ToolResult{
+					Success: false,
+					Error:   "invalid path parameter: must be a string",
+				}, fmt.Errorf("path parameter must be a string, got %T", args["path"])
+			}
+
+			content, ok := args["content"].(string)
+			if !ok {
+				return tools.ToolResult{
+					Success: false,
+					Error:   "invalid content parameter: must be a string",
+				}, fmt.Errorf("content parameter must be a string, got %T", args["content"])
+			}
+
 			appendMode := false
 			if a, ok := args["append"].(bool); ok {
 				appendMode = a
@@ -312,13 +332,19 @@ func SearchCodeTool(projectRoot string, auditor *security.Auditor) *tools.Tool {
 			Required: []string{"query"},
 		},
 		Handler: func(args map[string]any) (tools.ToolResult, error) {
-			// Search always starts at projectRoot and is internal, 
+			// Search always starts at projectRoot and is internal,
 			// but we can still audit the projectRoot just in case.
 			if err := auditor.AuditPath(projectRoot); err != nil {
 				return tools.ToolResult{Success: false, Error: err.Error()}, nil
 			}
 
-			query := args["query"].(string)
+			query, ok := args["query"].(string)
+			if !ok {
+				return tools.ToolResult{
+					Success: false,
+					Error:   "invalid query parameter: must be a string",
+				}, fmt.Errorf("query parameter must be a string, got %T", args["query"])
+			}
 			filePattern := "*"
 			if p, ok := args["file_pattern"].(string); ok && p != "" {
 				filePattern = p

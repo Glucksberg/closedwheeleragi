@@ -31,7 +31,13 @@ func ExecCommandTool(projectRoot string, timeout time.Duration, auditor *securit
 			Required: []string{"command"},
 		},
 		Handler: func(args map[string]any) (tools.ToolResult, error) {
-			fullCmd := args["command"].(string)
+			fullCmd, ok := args["command"].(string)
+			if !ok {
+				return tools.ToolResult{
+					Success: false,
+					Error:   "invalid command parameter: must be a string",
+				}, fmt.Errorf("command parameter must be a string, got %T", args["command"])
+			}
 			if cmdArgs, ok := args["args"].(string); ok {
 				fullCmd += " " + cmdArgs
 			}
@@ -60,7 +66,8 @@ func ExecCommandTool(projectRoot string, timeout time.Duration, auditor *securit
 			cmd.Stderr = &stderr
 
 			// Run with timeout
-			done := make(chan error)
+			// Use buffered channel to prevent goroutine leak on timeout
+			done := make(chan error, 1)
 			go func() {
 				done <- cmd.Run()
 			}()
@@ -75,7 +82,9 @@ func ExecCommandTool(projectRoot string, timeout time.Duration, auditor *securit
 					}, nil
 				}
 			case <-time.After(timeout):
-				cmd.Process.Kill()
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+				}
 				return tools.ToolResult{
 					Success: false,
 					Error:   "command timed out",

@@ -63,5 +63,3 @@ workplace/*/
 # Memory and state files
 *.state
 *.cache
-- Copia.env
-.agi/config - Copia.json

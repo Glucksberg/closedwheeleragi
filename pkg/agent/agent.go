@@ -714,11 +714,12 @@ func (a *Agent) StartTelegram() {
 
 					// Handle callback queries (approval buttons)
 					if u.CallbackQuery != nil {
-						// Null pointer guard
+						// Null pointer guards - check all nested structures
 						if u.CallbackQuery.Message == nil {
 							a.logger.Error("Received callback query with nil message")
 							continue
 						}
+						// Chat is a struct, not a pointer, so we check Message only
 
 						if u.CallbackQuery.Message.Chat.ID == a.config.Telegram.ChatID {
 							switch u.CallbackQuery.Data {

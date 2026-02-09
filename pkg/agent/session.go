@@ -96,12 +96,23 @@ func (sm *SessionManager) MarkContextSent(systemPrompt, rules, projectInfo strin
 }
 
 // AddMessage adds a message to session history
+// Prevents memory leaks by limiting message history to maxMessages
 func (sm *SessionManager) AddMessage(msg llm.Message) {
+	const maxMessages = 1000 // Prevent unbounded growth
+
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	sm.currentSession.Messages = append(sm.currentSession.Messages, msg)
-	sm.currentSession.LastActivity = time.Now()
+	s := sm.currentSession
+	s.Messages = append(s.Messages, msg)
+
+	// Trim old messages if limit exceeded
+	if len(s.Messages) > maxMessages {
+		// Keep only the most recent messages
+		s.Messages = s.Messages[len(s.Messages)-maxMessages:]
+	}
+
+	s.LastActivity = time.Now()
 }
 
 // GetMessages returns all session messages
