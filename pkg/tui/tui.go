@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -847,13 +848,17 @@ type statusUpdateMsg struct {
 	status string
 }
 
-// Run starts the TUI
-func Run(ag *agent.Agent) error {
-	p := tea.NewProgram(
-		NewModel(ag),
+// Run starts the TUI with an optional context for cancellation.
+func Run(ag *agent.Agent, ctx ...context.Context) error {
+	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
-	)
+	}
+	if len(ctx) > 0 && ctx[0] != nil {
+		opts = append(opts, tea.WithContext(ctx[0]))
+	}
+
+	p := tea.NewProgram(NewModel(ag), opts...)
 
 	// Set status callback
 	ag.SetStatusCallback(func(s string) {
@@ -861,5 +866,9 @@ func Run(ag *agent.Agent) error {
 	})
 
 	_, err := p.Run()
+
+	// Clear status callback to prevent sends after program exits
+	ag.SetStatusCallback(nil)
+
 	return err
 }

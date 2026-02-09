@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"ClosedWheeler/pkg/agent"
 	"ClosedWheeler/pkg/config"
@@ -108,22 +112,42 @@ func main() {
 		log.Fatalf("❌ Failed to create agent: %v", err)
 	}
 
+	// Context for graceful shutdown — cancelling it forces bubbletea to exit
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Signal handler: first SIGINT/SIGTERM cancels context, second force-exits
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+		select {
+		case <-sigCh:
+			os.Exit(1)
+		case <-time.After(5 * time.Second):
+			os.Exit(1)
+		}
+	}()
+
 	// Start Telegram Bridge
 	ag.StartTelegram()
 
 	// Start Heartbeat
 	ag.StartHeartbeat()
 
-	// Run Enhanced TUI
-	if err := tui.RunEnhanced(ag); err != nil {
-		fmt.Printf("\n❌ TUI error: %v\n", err)
-		fmt.Println("Check .agi/debug.log for more details.")
-		os.Exit(1)
+	// Run TUI (passes context so cancel() forces exit even if bubbletea hangs)
+	if err := tui.Run(ag, ctx); err != nil {
+		// Ignore context-cancelled errors — that's just our shutdown path
+		if ctx.Err() == nil {
+			log.Fatalf("❌ TUI error: %v", err)
+		}
 	}
 
-	// Graceful shutdown
-	if err := ag.Close(); err != nil {
-		log.Printf("⚠️  Error during shutdown: %v", err)
+	// Clean shutdown
+	signal.Stop(sigCh)
+	if err := ag.Shutdown(); err != nil {
+		log.Printf("⚠️  Failed to shutdown: %v", err)
 	}
 
 	fmt.Println("\n👋 Goodbye!")
