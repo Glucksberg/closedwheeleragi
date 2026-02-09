@@ -27,13 +27,8 @@ func (p *AnthropicProvider) Endpoint(baseURL string) string {
 func (p *AnthropicProvider) SetHeaders(req *http.Request, apiKey string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
-
-	// Setup tokens (sk-ant-oat01-*) use Bearer auth; regular API keys use x-api-key
-	if strings.HasPrefix(apiKey, "sk-ant-oat01-") {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	} else {
-		req.Header.Set("x-api-key", apiKey)
-	}
+	// Anthropic's direct API always uses x-api-key header for all key types
+	req.Header.Set("x-api-key", apiKey)
 }
 
 // --- Anthropic request types ---
