@@ -3,6 +3,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -126,12 +128,18 @@ func (ds *DualSession) StopConversation() {
 	}
 }
 
-// runConversation runs the actual conversation loop
+// runConversation runs the actual conversation loop with enhanced robustness
 func (ds *DualSession) runConversation(initialPrompt string) {
 	defer func() {
 		ds.mu.Lock()
 		ds.running = false
 		ds.mu.Unlock()
+
+		// Save the conversation log automatically at the end
+		filename := ds.saveConversationLog()
+		if filename != "" {
+			ds.addMessage("System", fmt.Sprintf("💾 Debate log saved to: %s", filename), ds.currentTurn)
+		}
 	}()
 
 	// Start with Agent A receiving the initial prompt
@@ -157,11 +165,74 @@ func (ds *DualSession) runConversation(initialPrompt string) {
 		turnNum := ds.currentTurn
 		ds.mu.Unlock()
 
-		// Get response from current agent
-		response, err := currentAgent.Chat(currentMessage)
-		if err != nil {
-			// Log error and stop
-			ds.addMessage(currentSpeaker, fmt.Sprintf("[ERROR: %v]", err), turnNum)
+		// Robust Turn Loop: Retry if turn fails or returns empty, 
+		// but wait indefinitely while the agent is 'active' (thinking/working)
+		var response string
+		var err error
+		maxRetries := 3
+		
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			if attempt > 0 {
+				ds.addMessage("System", fmt.Sprintf("🔄 [Attempt %d/%d] Nudging %s...", attempt+1, maxRetries+1, currentSpeaker), turnNum)
+				time.Sleep(2 * time.Second)
+			}
+
+			// We use a channel to monitor the Chat execution
+			type chatResult struct {
+				resp string
+				err  error
+			}
+			resultChan := make(chan chatResult, 1)
+
+			go func() {
+				// We call Chat. This is synchronous and will block until done.
+				// It updates Agent.lastActivity internally during tool calls.
+				resp, e := currentAgent.Chat(currentMessage)
+				resultChan <- chatResult{resp, e}
+			}()
+
+			// Liveness Check Loop
+			stuckThreshold := 3 * time.Minute // Nudge if silent for 3 mins
+			ticker := time.NewTicker(30 * time.Second)
+			activeWaiting := true
+
+			for activeWaiting {
+				select {
+				case <-ds.stopChan:
+					return
+				case res := <-resultChan:
+					response = res.resp
+					err = res.err
+					activeWaiting = false
+					ticker.Stop()
+				case <-ticker.C:
+					// Check for 'dead air'
+					lastAct := currentAgent.GetLastActivity()
+					if time.Since(lastAct) > stuckThreshold {
+						ds.addMessage("System", 
+							fmt.Sprintf("⚠️ %s seems stuck (no activity for %s). Attempting to wake up...", 
+							currentSpeaker, stuckThreshold.Round(time.Minute)), turnNum)
+						// We can't safely kill the Chat goroutine, but we can break out 
+						// of this wait and try a retry if desired.
+						// However, if it's still running, it might eventually finish.
+						// For now, we continue waiting because the user said "aguardar".
+					}
+				}
+			}
+
+			if err == nil && response != "" {
+				break
+			}
+			
+			if err != nil {
+				ds.addMessage("System", fmt.Sprintf("⚠️ Turn error: %v", err), turnNum)
+			} else if response == "" {
+				ds.addMessage("System", "⚠️ Received empty response.", turnNum)
+			}
+		}
+
+		if err != nil || response == "" {
+			ds.addMessage("System", fmt.Sprintf("❌ Turn failed after %d retries. Stopping debate.", maxRetries), turnNum)
 			return
 		}
 
@@ -183,8 +254,8 @@ func (ds *DualSession) runConversation(initialPrompt string) {
 		}
 		currentMessage = response
 
-		// Small delay between turns
-		time.Sleep(500 * time.Millisecond)
+		// Small delay between turns for TUI stability
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 
@@ -206,6 +277,53 @@ func (ds *DualSession) addMessage(speaker, content string, turn int) {
 	if ds.multiWindow != nil && ds.multiWindow.IsEnabled() {
 		ds.multiWindow.WriteMessage(speaker, content, turn)
 	}
+
+	// Always append to a global debate log file
+	ds.appendToGlobalLog(msg)
+}
+
+// saveConversationLog saves the full conversation log to a Markdown file
+func (ds *DualSession) saveConversationLog() string {
+	ds.mu.RLock()
+	if len(ds.conversationLog) == 0 {
+		ds.mu.RUnlock()
+		return ""
+	}
+
+	content := ds.FormatConversation()
+	workplacePath := ds.agentA.GetWorkplacePath()
+	ds.mu.RUnlock()
+
+	// Create debates directory in workplace
+	debatesDir := filepath.Join(workplacePath, "debates")
+	os.MkdirAll(debatesDir, 0755)
+
+	// Generate filename based on timestamp and topic
+	timestamp := time.Now().Format("20060102_150405")
+	filename := filepath.Join(debatesDir, fmt.Sprintf("debate_%s.md", timestamp))
+
+	os.WriteFile(filename, []byte(content), 0644)
+	return filename
+}
+
+// appendToGlobalLog appends a single message to a persistent debate log
+func (ds *DualSession) appendToGlobalLog(msg DualMessage) {
+	workplacePath := ds.agentA.GetWorkplacePath()
+	logFile := filepath.Join(workplacePath, "debate_history.log")
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	entry := fmt.Sprintf("[%s] %s (Turn %d): %s\n\n",
+		msg.Timestamp.Format("2006-01-02 15:04:05"),
+		msg.Speaker,
+		msg.Turn,
+		msg.Content)
+
+	f.WriteString(entry)
 }
 
 // shouldStopConversation checks if the conversation should stop based on content

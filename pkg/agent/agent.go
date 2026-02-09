@@ -58,6 +58,7 @@ type Agent struct {
 	roadmap        *roadmap.Roadmap   // Strategic planning
 	healthChecker  *health.Checker    // Health monitoring
 	mu             sync.Mutex         // Mutex for thread safety (Heartbeat vs User)
+	lastActivity   time.Time          // Track last activity for liveness checks
 }
 
 // NewAgent creates a new agent instance
@@ -165,6 +166,7 @@ func NewAgent(cfg *config.Config, projectPath string, appPath string) (*Agent, e
 		roadmap:        roadmapMgr,          // Initialize roadmap
 		healthChecker:  healthChecker,       // Initialize health checker
 		mu:             sync.Mutex{},        // Initialize mutex
+		lastActivity:   time.Now(),
 	}
 
 	// Initialize brain and roadmap files
@@ -186,6 +188,7 @@ func NewAgent(cfg *config.Config, projectPath string, appPath string) (*Agent, e
 // SetStatusCallback sets the callback for status updates
 func (a *Agent) SetStatusCallback(cb func(string)) {
 	a.statusCallback = func(s string) {
+		a.UpdateActivity()
 		if cb != nil {
 			cb(s)
 		}
@@ -195,9 +198,70 @@ func (a *Agent) SetStatusCallback(cb func(string)) {
 	}
 }
 
+// UpdateActivity refreshes the last activity timestamp
+func (a *Agent) UpdateActivity() {
+	a.mu.Lock()
+	a.lastActivity = time.Now()
+	a.mu.Unlock()
+}
+
+// GetLastActivity returns the timestamp of the last activity
+func (a *Agent) GetLastActivity() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastActivity
+}
+
 // GetLogger returns the agent's logger
 func (a *Agent) GetLogger() *logger.Logger {
 	return a.logger
+}
+
+// CloneForDebate creates a clone of the agent for use in dual sessions (debates).
+// It shares read-only/thread-safe components but uses separate memory and session management.
+func (a *Agent) CloneForDebate(name string) *Agent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Create new memory for the clone (don't persist clone memory to main file)
+	cloneMemory := memory.NewManager("", &memory.Config{
+		MaxShortTermItems:  a.config.Memory.MaxShortTermItems,
+		MaxWorkingItems:    a.config.Memory.MaxWorkingItems,
+		MaxLongTermItems:   a.config.Memory.MaxLongTermItems,
+		CompressionTrigger: a.config.Memory.CompressionTrigger,
+	})
+
+	// Create new session manager
+	cloneSessionMgr := NewSessionManager()
+
+	// Clone the agent struct
+	clone := &Agent{
+		config:         a.config,
+		llm:            a.llm,
+		memory:         cloneMemory,
+		project:        a.project,
+		tools:          a.tools,
+		executor:       a.executor,
+		editManager:    a.editManager,
+		logger:         a.logger,
+		statusCallback: func(s string) {}, // Clones have their own (or no) callback by default
+		projectPath:    a.projectPath,
+		tgBot:          a.tgBot,
+		rules:          a.rules,
+		auditor:        a.auditor,
+		skillManager:   a.skillManager,
+		permManager:    a.permManager,
+		approvalChan:   make(chan bool),
+		ctx:            a.ctx,
+		cancel:         a.cancel,
+		sessionMgr:     cloneSessionMgr,
+		brain:          a.brain,
+		roadmap:        a.roadmap,
+		healthChecker:  a.healthChecker,
+		mu:             sync.Mutex{},
+	}
+
+	return clone
 }
 
 // Chat processes a user message and returns the response
@@ -214,6 +278,7 @@ func (a *Agent) Chat(userMessage string) (string, error) {
 
 	stats := a.sessionMgr.GetContextStats()
 	a.logger.Info("Chat started (Current Context: %d msgs)", stats.MessageCount)
+	a.lastActivity = time.Now()
 
 
 	// Age working memory at the start of each chat
@@ -341,6 +406,9 @@ func (a *Agent) handleToolCalls(resp *llm.ChatResponse, messages []llm.Message, 
 	if depth > 10 {
 		a.logger.Info("Deep tool execution detected (depth %d), continuing task...", depth)
 	}
+
+	// Refresh activity at start of tool execution
+	a.UpdateActivity()
 
 	toolCalls := a.llm.GetToolCalls(resp)
 	a.logger.Info("Executing %d tool calls at depth %d", len(toolCalls), depth)
@@ -1231,12 +1299,25 @@ func (a *Agent) ChatWithStreaming(userMessage string, callback llm.StreamingCall
 
 // syncProjectTasks ensures the project's task.md is initialized
 func (a *Agent) syncProjectTasks() {
-	taskPath := filepath.Join(a.projectPath, "task.md")
+	taskPath := filepath.Join(a.GetWorkplacePath(), "task.md")
 	if _, err := os.Stat(taskPath); os.IsNotExist(err) {
-		a.logger.Info("Initializing project task.md")
+		a.logger.Info("Initializing project task.md in workplace")
 		initialContent := "# 📋 Project Tasks\n\n- [ ] Initial project audit and setup\n"
 		os.WriteFile(taskPath, []byte(initialContent), 0644)
 	}
+}
+
+// GetWorkplacePath returns the path to the workplace directory
+func (a *Agent) GetWorkplacePath() string {
+	if filepath.Base(a.projectPath) == "workplace" {
+		return a.projectPath
+	}
+	return filepath.Join(a.projectPath, "workplace")
+}
+
+// GetProjectPath returns the project root path
+func (a *Agent) GetProjectPath() string {
+	return a.projectPath
 }
 
 // GetEditManager returns the edit manager for session tracking
@@ -1297,17 +1378,12 @@ func (a *Agent) StartHeartbeat() {
 				hasCriticalIssues := healthStatus.BuildStatus == "failing" ||
 					healthStatus.TestStatus == "failing"
 
-				// Read task.md directly
-				taskPath := filepath.Join(a.projectPath, "workplace", "task.md")
+				// Read task.md directly from workplace
+				taskPath := filepath.Join(a.GetWorkplacePath(), "task.md")
 				content, err := os.ReadFile(taskPath)
 				if err != nil {
-					// Fallback to root task.md
-					taskPath = filepath.Join(a.projectPath, "task.md")
-					content, err = os.ReadFile(taskPath)
-					if err != nil {
-						a.logger.Error("Heartbeat failed to read task.md: %v", err)
-						continue
-					}
+					a.logger.Error("Heartbeat failed to read task.md from workplace: %v", err)
+					continue
 				}
 
 				// Simple heuristic to check for pending tasks

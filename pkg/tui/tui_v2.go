@@ -170,7 +170,7 @@ func NewEnhancedModel(ag *agent.Agent) EnhancedModel {
 		showTimestamps:   true,
 		verbose:          ag.Config().UI.Verbose,
 		activeTools:      make([]ToolExecution, 0),
-		dualSession:      NewDualSession(ag, ag), // Same agent for now, can be different
+		dualSession:      NewDualSession(ag.CloneForDebate("Agent A"), ag.CloneForDebate("Agent B")),
 		providerManager:  pm,
 		toolRetryWrapper: retryWrapper,
 		conversationView: NewConversationView(),

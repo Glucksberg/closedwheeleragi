@@ -37,7 +37,11 @@ func TaskManagerTool(projectRoot string, auditor *security.Auditor) *tools.Tool 
 		},
 		Handler: func(args map[string]any) (tools.ToolResult, error) {
 			action := args["action"].(string)
-			taskPath := filepath.Join(projectRoot, "task.md")
+			workplacePath := projectRoot
+			if filepath.Base(projectRoot) != "workplace" {
+				workplacePath = filepath.Join(projectRoot, "workplace")
+			}
+			taskPath := filepath.Join(workplacePath, "task.md")
 
 			// Security check using auditor
 			if err := auditor.AuditPath(taskPath); err != nil {
