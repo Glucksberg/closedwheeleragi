@@ -216,6 +216,14 @@ func (m Model) pickerUpdateProvider(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 		m.pickerNewURL = selected.BaseURL
 
+		// If Anthropic is selected and OAuth is active, skip API key step
+		if selected.Provider == "anthropic" && m.agent.HasOAuth() {
+			m.pickerNewKey = m.agent.Config().APIKey
+			m.pickerStep = pickerStepModel
+			m.pickerCursor = 0
+			return m, nil
+		}
+
 		if !sameProvider && selected.NeedsKey {
 			// Different provider: ask for API key
 			m.pickerStep = pickerStepAPIKey
@@ -437,6 +445,11 @@ func (m Model) pickerViewProvider() string {
 		hint := ""
 		if models, ok := providerModels[p.Label]; ok {
 			hint = fmt.Sprintf(" (%d models)", len(models))
+		}
+
+		// Show OAuth status for Anthropic
+		if p.Provider == "anthropic" && m.agent.HasOAuth() {
+			hint += " [OAuth: " + m.agent.GetOAuthExpiry() + "]"
 		}
 
 		line := style.Render(cursor+label) + pickerHintStyle.Render(hint)

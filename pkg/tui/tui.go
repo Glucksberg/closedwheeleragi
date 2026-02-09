@@ -5,10 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
 	"ClosedWheeler/pkg/agent"
+	"ClosedWheeler/pkg/llm"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -174,6 +177,11 @@ type Model struct {
 	pickerInput    textinput.Model
 	pickerNewKey   string
 	pickerNewURL   string
+
+	// OAuth login state
+	loginActive   bool
+	loginVerifier string
+	loginInput    textinput.Model
 }
 
 // NewModel creates a new TUI model
@@ -233,6 +241,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pickerActive {
 			updated, cmd := m.pickerUpdate(msg)
 			return updated, cmd
+		}
+
+		// Login mode intercepts all keys when active
+		if m.loginActive {
+			return m.loginUpdate(msg)
 		}
 
 		switch msg.Type {
@@ -387,6 +400,18 @@ func (m Model) View() string {
 		return sb.String()
 	}
 
+	// Login overlay
+	if m.loginActive {
+		var sb strings.Builder
+		header := headerStyle.Render("🤖 Coder AGI")
+		sb.WriteString(header)
+		sb.WriteString("\n")
+		sb.WriteString(m.renderStatusBar())
+		sb.WriteString("\n")
+		sb.WriteString(m.loginView())
+		return sb.String()
+	}
+
 	var sb strings.Builder
 
 	// Header
@@ -433,7 +458,7 @@ func (m Model) View() string {
 	sb.WriteString("\n")
 
 	// Help bar
-	help := helpStyle.Render("Enter: Send │ /help: Commands │ /model: Switch Model │ Ctrl+C/D: Quit")
+	help := helpStyle.Render("Enter: Send │ /help: Commands │ /login: OAuth │ /model: Switch │ Ctrl+C/D: Quit")
 	sb.WriteString(help)
 
 	return sb.String()
@@ -518,6 +543,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			Role: "system",
 			Content: `📚 Commands:
   /help, /h     - Show this help
+  /login        - Anthropic OAuth login (Claude Pro/Max)
   /model        - Switch provider & model (interactive)
   /model <name> - Quick switch to a model
   /clear, /c    - Clear conversation
@@ -675,6 +701,42 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			m.initPicker()
 			return m, textinput.Blink
 		}
+
+	case "/login":
+		// Start OAuth login flow
+		verifier, challenge, err := llm.GeneratePKCE()
+		if err != nil {
+			m.messages = append(m.messages, Message{
+				Role:      "error",
+				Content:   fmt.Sprintf("Failed to generate PKCE: %v", err),
+				Timestamp: time.Now(),
+			})
+			m.updateViewport()
+			return m, nil
+		}
+
+		authURL := llm.BuildAuthURL(challenge, verifier)
+
+		// Try to open browser
+		openBrowser(authURL)
+
+		m.loginActive = true
+		m.loginVerifier = verifier
+
+		ti := textinput.New()
+		ti.Placeholder = "Paste the authorization code (code#state)..."
+		ti.CharLimit = 512
+		ti.Width = 60
+		ti.Focus()
+		m.loginInput = ti
+
+		m.messages = append(m.messages, Message{
+			Role:      "system",
+			Content:   fmt.Sprintf("Opening browser for Anthropic OAuth login...\n\nIf the browser didn't open, visit:\n%s", authURL),
+			Timestamp: time.Now(),
+		})
+		m.updateViewport()
+		return m, textinput.Blink
 
 	case "/exit", "/q":
 		return m, tea.Quit
@@ -873,6 +935,91 @@ func quitKeyFilter() func(tea.Model, tea.Msg) tea.Msg {
 			}
 		}
 		return msg
+	}
+}
+
+// loginUpdate handles key events during OAuth login flow.
+func (m Model) loginUpdate(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if msg.Type == tea.KeyEsc {
+		m.loginActive = false
+		m.messages = append(m.messages, Message{
+			Role:      "system",
+			Content:   "OAuth login cancelled.",
+			Timestamp: time.Now(),
+		})
+		m.updateViewport()
+		return m, nil
+	}
+
+	if msg.Type == tea.KeyEnter {
+		code := strings.TrimSpace(m.loginInput.Value())
+		if code == "" {
+			return m, nil
+		}
+
+		m.loginActive = false
+		err := m.agent.LoginOAuth(code, m.loginVerifier)
+		if err != nil {
+			m.messages = append(m.messages, Message{
+				Role:      "error",
+				Content:   fmt.Sprintf("OAuth login failed: %v", err),
+				Timestamp: time.Now(),
+			})
+		} else {
+			m.messages = append(m.messages, Message{
+				Role:      "system",
+				Content:   fmt.Sprintf("OAuth login successful! Token %s.\nYou can now use Anthropic models.", m.agent.GetOAuthExpiry()),
+				Timestamp: time.Now(),
+			})
+		}
+		m.updateViewport()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.loginInput, cmd = m.loginInput.Update(msg)
+	return m, cmd
+}
+
+// loginView renders the OAuth login overlay.
+func (m Model) loginView() string {
+	var s strings.Builder
+	boxWidth := m.width - 6
+	if boxWidth < 20 {
+		boxWidth = 20
+	}
+
+	s.WriteString(pickerTitleStyle.Render("🔑 Anthropic OAuth Login"))
+	s.WriteString("\n\n")
+	s.WriteString(pickerSubtitleStyle.Render("A browser window should have opened for authorization."))
+	s.WriteString("\n")
+	s.WriteString(pickerSubtitleStyle.Render("After authorizing, paste the code below:"))
+	s.WriteString("\n\n")
+	s.WriteString(m.loginInput.View())
+	s.WriteString("\n\n")
+	s.WriteString(pickerHintStyle.Render("  The code format is: code#state"))
+	s.WriteString("\n")
+	s.WriteString(pickerHintStyle.Render("  Press Enter to submit · Esc to cancel"))
+	s.WriteString("\n")
+
+	return pickerBoxStyle.Width(boxWidth).Render(s.String())
+}
+
+// openBrowser attempts to open a URL in the default browser.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return
+	}
+	if err := cmd.Start(); err == nil {
+		go func() { _ = cmd.Wait() }() // Reap process
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"ClosedWheeler/pkg/agent"
 	"ClosedWheeler/pkg/config"
+	"ClosedWheeler/pkg/llm"
 	"ClosedWheeler/pkg/tui"
 
 	"github.com/charmbracelet/lipgloss"
@@ -50,8 +51,26 @@ func main() {
 		log.Fatalf("❌ Failed to load config: %v", err)
 	}
 
-	// Check API key
-	if cfg.APIKey == "" {
+	// Check API key — also allow OAuth credentials as alternative
+	oauthCreds, _ := config.LoadOAuth()
+
+	// Auto-refresh OAuth if expired
+	if oauthCreds != nil && oauthCreds.NeedsRefresh() && oauthCreds.RefreshToken != "" {
+		fmt.Println("🔄 Refreshing OAuth token...")
+		newCreds, err := llm.RefreshOAuthToken(oauthCreds.RefreshToken)
+		if err != nil {
+			fmt.Printf("⚠️  OAuth token refresh failed: %v\n", err)
+			fmt.Println("   Use /login to re-authenticate.")
+		} else {
+			oauthCreds = newCreds
+			if err := config.SaveOAuth(newCreds); err != nil {
+				fmt.Printf("⚠️  Failed to persist refreshed token: %v\n", err)
+			}
+			fmt.Println("✅ OAuth token refreshed.")
+		}
+	}
+
+	if cfg.APIKey == "" && oauthCreds == nil {
 		fmt.Println("⚡ Welcome to ClosedWheelerAGI!")
 		fmt.Println("   First time setup detected.")
 		fmt.Println()
@@ -74,7 +93,8 @@ func main() {
 		}
 
 		// Re-verify after setup
-		if cfg.APIKey == "" {
+		oauthCreds, _ = config.LoadOAuth()
+		if cfg.APIKey == "" && oauthCreds == nil {
 			fmt.Println("❌ Configuration incomplete. Exiting.")
 			os.Exit(1)
 		}

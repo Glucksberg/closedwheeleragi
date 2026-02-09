@@ -3,6 +3,7 @@
 # Configuration files with secrets
 .agi/config.json
 .agi/memory.json
+.agi/oauth.json
 .agi/backups/
 .claude/settings.local.json
 browsers/

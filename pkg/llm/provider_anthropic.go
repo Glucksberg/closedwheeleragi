@@ -9,14 +9,20 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"ClosedWheeler/pkg/config"
 )
 
 const anthropicAPIVersion = "2023-06-01"
 const anthropicDefaultMaxTokens = 4096
 
 // AnthropicProvider implements the Provider interface for the Anthropic Messages API.
-type AnthropicProvider struct{}
+type AnthropicProvider struct {
+	mu    sync.Mutex
+	oauth *config.OAuthCredentials
+}
 
 func (p *AnthropicProvider) Name() string { return "anthropic" }
 
@@ -24,12 +30,66 @@ func (p *AnthropicProvider) Endpoint(baseURL string) string {
 	return baseURL + "/messages"
 }
 
+// SetOAuth sets OAuth credentials for Bearer auth.
+func (p *AnthropicProvider) SetOAuth(creds *config.OAuthCredentials) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.oauth = creds
+}
+
+// GetOAuth returns the current OAuth credentials.
+func (p *AnthropicProvider) GetOAuth() *config.OAuthCredentials {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.oauth
+}
+
+// RefreshIfNeeded checks if OAuth credentials need refreshing and refreshes them.
+// This should be called once before making an API request, NOT inside SetHeaders.
+func (p *AnthropicProvider) RefreshIfNeeded() {
+	p.mu.Lock()
+	oauth := p.oauth
+	p.mu.Unlock()
+
+	if oauth == nil || oauth.AccessToken == "" || oauth.RefreshToken == "" {
+		return
+	}
+	if !oauth.NeedsRefresh() {
+		return
+	}
+
+	newCreds, err := RefreshOAuthToken(oauth.RefreshToken)
+	if err != nil {
+		log.Printf("[WARN] OAuth token refresh failed: %v, using existing token", err)
+		return
+	}
+	p.mu.Lock()
+	p.oauth = newCreds
+	p.mu.Unlock()
+
+	if err := config.SaveOAuth(newCreds); err != nil {
+		log.Printf("[WARN] Failed to save refreshed OAuth credentials: %v", err)
+	}
+	log.Printf("[INFO] OAuth token refreshed, expires in %v", newCreds.ExpiresIn())
+}
+
 func (p *AnthropicProvider) SetHeaders(req *http.Request, apiKey string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
 
+	p.mu.Lock()
+	oauth := p.oauth
+	p.mu.Unlock()
+
+	if oauth != nil && oauth.AccessToken != "" {
+		// OAuth: Bearer auth + beta headers (refresh already done by caller)
+		req.Header.Set("Authorization", "Bearer "+oauth.AccessToken)
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14")
+		return
+	}
+
 	if IsSetupToken(apiKey) {
-		// OAuth/setup tokens use Bearer auth + beta header
+		// Setup tokens use Bearer auth + beta header (won't work for API calls, but don't crash)
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	} else {

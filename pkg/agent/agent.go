@@ -66,12 +66,24 @@ type Agent struct {
 
 // NewAgent creates a new agent instance
 func NewAgent(cfg *config.Config, projectPath string, appPath string) (*Agent, error) {
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("API key is required")
+	// Load OAuth credentials — if present, API key is not required
+	oauthCreds, oauthErr := config.LoadOAuth()
+	if oauthErr != nil {
+		// Log but don't fail — OAuth is optional
+		fmt.Printf("[WARN] Failed to load OAuth credentials: %v\n", oauthErr)
+	}
+
+	if cfg.APIKey == "" && oauthCreds == nil {
+		return nil, fmt.Errorf("API key is required (or use /login for OAuth)")
 	}
 
 	// Initialize LLM client with provider support
 	llmClient := llm.NewClientWithProvider(cfg.APIBaseURL, cfg.APIKey, cfg.Model, cfg.Provider)
+
+	// Wire in OAuth credentials if available
+	if oauthCreds != nil {
+		llmClient.SetOAuthCredentials(oauthCreds)
+	}
 
 	// Configure fallback models if specified
 	if len(cfg.FallbackModels) > 0 {
@@ -899,11 +911,17 @@ func (a *Agent) SwitchModel(provider, baseURL, apiKey, model string) error {
 	origModel := a.config.Model
 	origLLM := a.llm
 
+	// Preserve OAuth credentials across model switch
+	existingOAuth := a.llm.GetOAuthCredentials()
+
 	a.config.Provider = provider
 	a.config.APIBaseURL = baseURL
 	a.config.APIKey = apiKey
 	a.config.Model = model
 	a.llm = llm.NewClientWithProvider(baseURL, apiKey, model, provider)
+	if existingOAuth != nil {
+		a.llm.SetOAuthCredentials(existingOAuth)
+	}
 	if len(a.config.FallbackModels) > 0 {
 		a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)
 	}
@@ -920,6 +938,44 @@ func (a *Agent) SwitchModel(provider, baseURL, apiKey, model string) error {
 
 	a.logger.Info("Model switched: provider=%s model=%s url=%s", provider, model, baseURL)
 	return nil
+}
+
+// LoginOAuth exchanges an authorization code for OAuth tokens and configures the client.
+// The verifier is used both as the PKCE code_verifier and as the expected state for CSRF validation.
+func (a *Agent) LoginOAuth(authCode, verifier string) error {
+	creds, err := llm.ExchangeCode(authCode, verifier, verifier)
+	if err != nil {
+		return fmt.Errorf("OAuth token exchange failed: %w", err)
+	}
+
+	// Save to disk
+	if err := config.SaveOAuth(creds); err != nil {
+		return fmt.Errorf("failed to save OAuth credentials: %w", err)
+	}
+
+	// Wire into current LLM client
+	a.llm.SetOAuthCredentials(creds)
+
+	a.logger.Info("OAuth login successful, token expires in %v", creds.ExpiresIn())
+	return nil
+}
+
+// HasOAuth returns true if the agent has active OAuth credentials.
+func (a *Agent) HasOAuth() bool {
+	creds := a.llm.GetOAuthCredentials()
+	return creds != nil && creds.AccessToken != ""
+}
+
+// GetOAuthExpiry returns the OAuth token expiry info.
+func (a *Agent) GetOAuthExpiry() string {
+	creds := a.llm.GetOAuthCredentials()
+	if creds == nil {
+		return "no OAuth credentials"
+	}
+	if creds.IsExpired() {
+		return "expired"
+	}
+	return fmt.Sprintf("expires in %v", creds.ExpiresIn().Round(time.Minute))
 }
 
 // ReloadProject reloads the project context, rules, and skills
@@ -1130,6 +1186,10 @@ The AGI has full access to the project and can execute tools as configured in pe
 
 								// Recreate LLM client with new settings
 								a.llm = llm.NewClientWithProvider(a.config.APIBaseURL, a.config.APIKey, a.config.Model, a.config.Provider)
+								// Re-attach OAuth credentials if available
+								if oauthCreds, _ := config.LoadOAuth(); oauthCreds != nil {
+									a.llm.SetOAuthCredentials(oauthCreds)
+								}
 								if len(a.config.FallbackModels) > 0 {
 									a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)
 								}

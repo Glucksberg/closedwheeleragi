@@ -35,6 +35,9 @@ type StreamingResponse struct {
 
 // ChatWithStreaming sends a chat request and streams the response
 func (c *Client) ChatWithStreaming(messages []Message, tools []ToolDefinition, temperature *float64, topP *float64, maxTokens *int, callback StreamingCallback) (*ChatResponse, error) {
+	// Refresh OAuth token before the request (no-op if not using OAuth)
+	c.RefreshOAuthIfNeeded()
+
 	jsonData, err := c.provider.BuildRequestBody(c.model, messages, tools, temperature, topP, maxTokens, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)

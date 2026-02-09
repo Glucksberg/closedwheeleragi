@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"ClosedWheeler/pkg/config"
 	"ClosedWheeler/pkg/utils"
 )
 
@@ -136,6 +137,30 @@ func (c *Client) SetFallbackModels(models []string, timeoutSeconds int) {
 	}
 }
 
+// SetOAuthCredentials sets OAuth credentials on the underlying provider.
+// Only has effect when the provider is Anthropic.
+func (c *Client) SetOAuthCredentials(creds *config.OAuthCredentials) {
+	if ap, ok := c.provider.(*AnthropicProvider); ok {
+		ap.SetOAuth(creds)
+	}
+}
+
+// GetOAuthCredentials returns the current OAuth credentials from the provider.
+func (c *Client) GetOAuthCredentials() *config.OAuthCredentials {
+	if ap, ok := c.provider.(*AnthropicProvider); ok {
+		return ap.GetOAuth()
+	}
+	return nil
+}
+
+// RefreshOAuthIfNeeded refreshes OAuth token if it's close to expiry.
+// Called once before the request loop, not inside SetHeaders.
+func (c *Client) RefreshOAuthIfNeeded() {
+	if ap, ok := c.provider.(*AnthropicProvider); ok {
+		ap.RefreshIfNeeded()
+	}
+}
+
 // Chat sends a chat completion request
 func (c *Client) Chat(messages []Message, temperature *float64, topP *float64, maxTokens *int) (*ChatResponse, error) {
 	return c.ChatWithTools(messages, nil, temperature, topP, maxTokens)
@@ -182,6 +207,9 @@ func (c *Client) chatWithFallback(messages []Message, tools []ToolDefinition, te
 
 // chatWithModel attempts to chat with a specific model, with optional timeout
 func (c *Client) chatWithModel(model string, messages []Message, tools []ToolDefinition, temperature *float64, topP *float64, maxTokens *int, timeout time.Duration) (*ChatResponse, error) {
+	// Refresh OAuth token before the request (no-op if not using OAuth)
+	c.RefreshOAuthIfNeeded()
+
 	jsonData, err := c.provider.BuildRequestBody(model, messages, tools, temperature, topP, maxTokens, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
