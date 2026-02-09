@@ -144,13 +144,25 @@ func main() {
 		}
 	}
 
-	// Clean shutdown
-	signal.Stop(sigCh)
-	if err := ag.Shutdown(); err != nil {
-		log.Printf("⚠️  Failed to shutdown: %v", err)
+	// Reset terminal to sane state (in case bubbletea didn't restore properly)
+	fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1006l") // disable mouse modes
+	fmt.Print("\033[?25h")                                      // show cursor
+	fmt.Print("\033[?1049l")                                    // exit alt screen
+
+	// Shutdown with timeout to guarantee exit
+	done := make(chan struct{})
+	go func() {
+		ag.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		log.Println("Shutdown timed out, forcing exit")
 	}
 
 	fmt.Println("\n👋 Goodbye!")
+	os.Exit(0)
 }
 
 func printBanner() {
