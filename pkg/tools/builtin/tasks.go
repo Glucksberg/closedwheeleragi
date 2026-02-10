@@ -36,7 +36,10 @@ func TaskManagerTool(projectRoot string, auditor *security.Auditor) *tools.Tool 
 			Required: []string{"action"},
 		},
 		Handler: func(args map[string]any) (tools.ToolResult, error) {
-			action := args["action"].(string)
+			action, ok := args["action"].(string)
+			if !ok || action == "" {
+				return tools.ToolResult{Success: false, Error: "missing required parameter: action"}, nil
+			}
 			workplacePath := projectRoot
 			if filepath.Base(projectRoot) != "workplace" {
 				workplacePath = filepath.Join(projectRoot, "workplace")
@@ -72,7 +75,10 @@ func TaskManagerTool(projectRoot string, auditor *security.Auditor) *tools.Tool 
 				return tools.ToolResult{Success: true, Output: "task.md already exists"}, nil
 
 			case "add":
-				task := args["task"].(string)
+				task, ok := args["task"].(string)
+				if !ok || task == "" {
+					return tools.ToolResult{Success: false, Error: "missing required parameter: task"}, nil
+				}
 				f, err := os.OpenFile(taskPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 				if err != nil {
 					return tools.ToolResult{Success: false, Error: err.Error()}, nil
@@ -85,8 +91,14 @@ func TaskManagerTool(projectRoot string, auditor *security.Auditor) *tools.Tool 
 				return tools.ToolResult{Success: true, Output: "Task added successfully."}, nil
 
 			case "update":
-				task := args["task"].(string)
-				status := args["status"].(string)
+				task, ok := args["task"].(string)
+				if !ok || task == "" {
+					return tools.ToolResult{Success: false, Error: "missing required parameter: task"}, nil
+				}
+				status, ok := args["status"].(string)
+				if !ok || status == "" {
+					return tools.ToolResult{Success: false, Error: "missing required parameter: status"}, nil
+				}
 
 				content, err := os.ReadFile(taskPath)
 				if err != nil {

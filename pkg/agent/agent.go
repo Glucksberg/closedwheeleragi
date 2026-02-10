@@ -608,10 +608,18 @@ func (a *Agent) handleToolCalls(resp *llm.ChatResponse, messages []llm.Message, 
 			result.Success = false
 		}
 
+		// When a tool fails, send the enhanced error (result.Error) to the LLM,
+		// not the empty result.Output. EnhanceToolError writes rich feedback to
+		// result.Error; if result.Output is empty on failure, use that instead.
+		toolContent := result.Output
+		if !result.Success && result.Error != "" && toolContent == "" {
+			toolContent = result.Error
+		}
+
 		// Add tool result to messages
 		messages = append(messages, llm.Message{
 			Role:       "tool",
-			Content:    result.Output,
+			Content:    toolContent,
 			ToolCallID: toolCalls[i].ID,
 		})
 
