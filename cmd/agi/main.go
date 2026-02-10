@@ -172,8 +172,8 @@ func main() {
 	// Start Heartbeat
 	ag.StartHeartbeat()
 
-	// Run TUI (passes context so cancel() forces exit even if bubbletea hangs)
-	if err := tui.Run(ag, ctx); err != nil {
+	// Run Enhanced TUI (passes context so cancel() forces exit even if bubbletea hangs)
+	if err := tui.RunEnhanced(ag, ctx); err != nil {
 		// Ignore context-cancelled errors — that's just our shutdown path
 		if ctx.Err() == nil {
 			log.Fatalf("❌ TUI error: %v", err)

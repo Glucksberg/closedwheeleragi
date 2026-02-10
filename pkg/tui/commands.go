@@ -8,6 +8,7 @@ import (
 
 	"ClosedWheeler/pkg/tools"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -238,9 +239,17 @@ func GetAllCommands() []CommandCategory {
 					Name:        "model",
 					Aliases:     []string{"m"},
 					Category:    "Integration",
-					Description: "Show or change LLM model",
-					Usage:       "/model [model-name]",
+					Description: "Interactive model/provider picker",
+					Usage:       "/model [model-name [effort]]",
 					Handler:     cmdModel,
+				},
+				{
+					Name:        "login",
+					Aliases:     []string{"auth", "oauth"},
+					Category:    "Integration",
+					Description: "OAuth login for Anthropic, OpenAI, or Google",
+					Usage:       "/login",
+					Handler:     cmdLogin,
 				},
 			},
 		},
@@ -1208,43 +1217,56 @@ func cmdTelegram(m *EnhancedModel, args []string) (tea.Model, tea.Cmd) {
 
 func cmdModel(m *EnhancedModel, args []string) (tea.Model, tea.Cmd) {
 	if len(args) == 0 {
-		// Show current model
-		model := m.agent.Config().Model
-		fallbacks := m.agent.Config().FallbackModels
-
-		var content strings.Builder
-		content.WriteString("🧠 **LLM Configuration**\n\n")
-		content.WriteString(fmt.Sprintf("**Primary Model:** %s\n", model))
-
-		if len(fallbacks) > 0 {
-			content.WriteString("\n**Fallback Models:**\n")
-			for i, fb := range fallbacks {
-				content.WriteString(fmt.Sprintf("%d. %s\n", i+1, fb))
-			}
-		}
-
-		m.messageQueue.Add(QueuedMessage{
-			Role:      "system",
-			Content:   content.String(),
-			Timestamp: time.Now(),
-			Complete:  true,
-		})
-		m.updateViewport()
+		// Launch interactive picker
+		m.initPicker()
 		return *m, nil
 	}
 
-	// Change model
+	// Quick switch: /model <name>
 	newModel := args[0]
-	m.agent.Config().Model = newModel
-	m.agent.SaveConfig()
+	reasoningEffort := ""
+	if len(args) > 1 {
+		reasoningEffort = args[1]
+	}
 
-	m.messageQueue.Add(QueuedMessage{
-		Role:      "system",
-		Content:   fmt.Sprintf("🧠 Model changed to: %s\n\nRestart required for changes to take effect.", newModel),
-		Timestamp: time.Now(),
-		Complete:  true,
-	})
+	cfg := m.agent.Config()
+	if err := m.agent.SwitchModel(cfg.Provider, cfg.APIBaseURL, cfg.APIKey, newModel, reasoningEffort); err != nil {
+		m.messageQueue.Add(QueuedMessage{
+			Role:      "error",
+			Content:   fmt.Sprintf("Failed to switch model: %v", err),
+			Timestamp: time.Now(),
+			Complete:  true,
+		})
+	} else {
+		msg := fmt.Sprintf("🧠 Switched to **%s**", newModel)
+		if reasoningEffort != "" {
+			msg += fmt.Sprintf(" · reasoning: %s", reasoningEffort)
+		}
+		m.messageQueue.Add(QueuedMessage{
+			Role:      "system",
+			Content:   msg,
+			Timestamp: time.Now(),
+			Complete:  true,
+		})
+	}
 	m.updateViewport()
+	return *m, nil
+}
+
+func cmdLogin(m *EnhancedModel, args []string) (tea.Model, tea.Cmd) {
+	m.loginActive = true
+	m.loginStep = loginStepPickProvider
+	m.loginCursor = 0
+	m.loginProvider = ""
+	m.loginVerifier = ""
+	m.loginAuthURL = ""
+	m.loginClipboard = false
+
+	ti := textinput.New()
+	ti.CharLimit = 2048
+	ti.Width = 60
+	m.loginInput = ti
+
 	return *m, nil
 }
 

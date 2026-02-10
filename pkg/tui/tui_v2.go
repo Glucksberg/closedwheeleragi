@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -108,6 +110,27 @@ type EnhancedModel struct {
 	toolRetryWrapper  *tools.IntelligentRetryWrapper // Intelligent tool retry system
 	conversationView  *ConversationView  // Live conversation view
 	multiWindow       *MultiWindowManager // Multi-window for debate viewing (one per agent)
+
+	// Model picker state (from tui.go)
+	pickerActive   bool
+	pickerStep     int
+	pickerCursor   int
+	pickerSelected ProviderOption
+	pickerInput    textinput.Model
+	pickerNewKey   string
+	pickerNewURL   string
+	pickerModelID  string
+
+	// OAuth login state (from tui.go)
+	loginActive   bool
+	loginStep     int
+	loginCursor   int
+	loginProvider string
+	loginVerifier string
+	loginAuthURL  string
+	loginClipboard bool
+	loginInput    textinput.Model
+	loginCancel   context.CancelFunc
 }
 
 // NewEnhancedModel creates a new enhanced TUI model
@@ -191,8 +214,41 @@ func (m EnhancedModel) Init() tea.Cmd {
 func (m EnhancedModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Handle OAuth exchange result (async callback from login flow)
+	if oaMsg, ok := msg.(oauthExchangeMsg); ok {
+		m.closeEnhancedLogin()
+		if oaMsg.err != nil {
+			m.messageQueue.Add(QueuedMessage{
+				Role:      "error",
+				Content:   fmt.Sprintf("OAuth login failed: %v", oaMsg.err),
+				Timestamp: time.Now(),
+				Complete:  true,
+			})
+		} else {
+			labels := map[string]string{"anthropic": "Anthropic", "openai": "OpenAI", "google": "Google Gemini"}
+			m.messageQueue.Add(QueuedMessage{
+				Role:      "system",
+				Content:   fmt.Sprintf("%s OAuth login successful! Token %s.", labels[oaMsg.provider], m.agent.GetOAuthExpiry()),
+				Timestamp: time.Now(),
+				Complete:  true,
+			})
+		}
+		m.updateViewport()
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Intercept keys when picker or login is active
+		if m.pickerActive {
+			newM, cmd := m.enhancedPickerUpdate(msg)
+			return newM, cmd
+		}
+		if m.loginActive {
+			newM, cmd := m.enhancedLoginUpdate(msg)
+			return newM, cmd
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
@@ -340,6 +396,14 @@ func (m EnhancedModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m EnhancedModel) View() string {
 	if !m.ready {
 		return m.spinner.View() + " Initializing ClosedWheelerAGI..."
+	}
+
+	// Render picker/login overlay if active (replaces main view)
+	if m.pickerActive {
+		return m.enhancedPickerView()
+	}
+	if m.loginActive {
+		return m.enhancedLoginView()
 	}
 
 	var sections []string
@@ -1006,13 +1070,17 @@ func tickAnimation() tea.Cmd {
 }
 
 
-// RunEnhanced starts the enhanced TUI
-func RunEnhanced(ag *agent.Agent) error {
-	p := tea.NewProgram(
-		NewEnhancedModel(ag),
+// RunEnhanced starts the enhanced TUI with optional context for cancellation.
+func RunEnhanced(ag *agent.Agent, ctx ...context.Context) error {
+	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+		tea.WithFilter(quitKeyFilter()),
+	}
+	if len(ctx) > 0 && ctx[0] != nil {
+		opts = append(opts, tea.WithContext(ctx[0]))
+	}
+
+	p := tea.NewProgram(NewEnhancedModel(ag), opts...)
 
 	// Set status callback
 	ag.SetStatusCallback(func(s string) {
@@ -1030,5 +1098,10 @@ func RunEnhanced(ag *agent.Agent) error {
 	})
 
 	_, err := p.Run()
+
+	// Clear callbacks to prevent sends after program exits
+	ag.SetStatusCallback(nil)
+	ag.SetStreamCallback(nil)
+
 	return err
 }
