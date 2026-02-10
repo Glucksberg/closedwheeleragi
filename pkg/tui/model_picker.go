@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"ClosedWheeler/pkg/llm"
+
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -44,44 +46,24 @@ var pickerProviders = []ProviderOption{
 	{Label: "Custom URL", Provider: "openai", BaseURL: "", NeedsKey: true},
 }
 
-// Known models per provider label
+// knownToModelOptions converts llm.KnownModel slice to ModelOption slice.
+func knownToModelOptions(km []llm.KnownModel) []ModelOption {
+	out := make([]ModelOption, len(km))
+	for i, m := range km {
+		out[i] = ModelOption{ID: m.ID, Hint: m.Hint}
+	}
+	return out
+}
+
+// providerModels returns the known model list for a provider label.
+// Single source of truth: all lists come from pkg/llm/models.go.
 var providerModels = map[string][]ModelOption{
-	"Anthropic": {
-		{ID: "claude-opus-4-6", Hint: "200K · Latest flagship · Opus 4.6"},
-		{ID: "claude-sonnet-4-5-20250929", Hint: "200K · Fast + capable"},
-		{ID: "claude-opus-4-20250514", Hint: "200K · Previous flagship"},
-		{ID: "claude-sonnet-4-20250514", Hint: "200K · Balanced"},
-		{ID: "claude-haiku-4-5-20251001", Hint: "200K · Fast + cheap"},
-		{ID: "claude-3-5-sonnet-20241022", Hint: "200K · Legacy"},
-		{ID: "claude-3-opus-20240229", Hint: "200K · Legacy flagship"},
-	},
-	"OpenAI": {
-		{ID: "gpt-5.3-codex", Hint: "200K · Codex flagship · Reasoning"},
-		{ID: "gpt-4o", Hint: "128K · Fast multimodal"},
-	},
-	"DeepSeek": {
-		{ID: "deepseek-chat", Hint: "128K · General purpose"},
-		{ID: "deepseek-coder", Hint: "128K · Code specialist"},
-		{ID: "deepseek-reasoner", Hint: "128K · Reasoning (R1)"},
-	},
-	"Moonshot": {
-		{ID: "kimi-k2.5", Hint: "256K · Kimi flagship · Free"},
-	},
-	"Google Gemini": {
-		{ID: "gemini-3-pro-preview", Hint: "1M · Latest flagship"},
-		{ID: "gemini-3-flash-preview", Hint: "1M · Latest fast"},
-		{ID: "gemini-2.5-pro", Hint: "1M · Stable pro"},
-		{ID: "gemini-2.5-flash", Hint: "1M · Stable fast"},
-		{ID: "gemini-2.5-flash-lite", Hint: "1M · Lightweight"},
-	},
-	"Local (Ollama)": {
-		{ID: "llama3", Hint: "8K · Meta general purpose"},
-		{ID: "codellama", Hint: "16K · Code specialist"},
-		{ID: "mistral", Hint: "32K · Fast general"},
-		{ID: "deepseek-coder-v2", Hint: "128K · Code"},
-		{ID: "phi3", Hint: "128K · Microsoft small"},
-		{ID: "qwen2.5-coder", Hint: "128K · Code specialist"},
-	},
+	"Anthropic":      knownToModelOptions(llm.AnthropicKnownModels),
+	"OpenAI":         knownToModelOptions(llm.OpenAIKnownModels),
+	"DeepSeek":       knownToModelOptions(llm.DeepSeekKnownModels),
+	"Moonshot":       knownToModelOptions(llm.MoonshotKnownModels),
+	"Google Gemini":  knownToModelOptions(llm.GoogleKnownModels),
+	"Local (Ollama)": knownToModelOptions(llm.OllamaKnownModels),
 }
 
 // EffortOption represents a selectable reasoning effort level

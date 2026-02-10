@@ -150,8 +150,17 @@ func ExchangeGoogleCode(code, verifier string) (*config.OAuthCredentials, error)
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
+	// Google omits refresh_token if the user already authorized previously.
+	// Fall back to the stored refresh token if available.
 	if tokenResp.RefreshToken == "" {
-		return nil, fmt.Errorf("no refresh token received — try again")
+		if stored, _ := config.LoadAllOAuth(); stored != nil {
+			if prev := stored["google"]; prev != nil && prev.RefreshToken != "" {
+				tokenResp.RefreshToken = prev.RefreshToken
+			}
+		}
+	}
+	if tokenResp.RefreshToken == "" {
+		return nil, fmt.Errorf("no refresh token received — revoke access at myaccount.google.com/permissions and try again")
 	}
 
 	// Discover Cloud Code Assist project
