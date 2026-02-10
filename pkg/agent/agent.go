@@ -66,12 +66,37 @@ type Agent struct {
 
 // NewAgent creates a new agent instance
 func NewAgent(cfg *config.Config, projectPath string, appPath string) (*Agent, error) {
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("API key is required")
+	// Load all OAuth credentials — if any present, API key is not required
+	oauthStore, oauthErr := config.LoadAllOAuth()
+	if oauthErr != nil {
+		fmt.Printf("[WARN] Failed to load OAuth credentials: %v\n", oauthErr)
+	}
+	hasAnyOAuth := len(oauthStore) > 0
+
+	if cfg.APIKey == "" && !hasAnyOAuth {
+		return nil, fmt.Errorf("API key is required (or use /login for OAuth)")
 	}
 
-	// Initialize LLM client
-	llmClient := llm.NewClient(cfg.APIBaseURL, cfg.APIKey, cfg.Model)
+	// Initialize LLM client with provider support
+	llmClient := llm.NewClientWithProvider(cfg.APIBaseURL, cfg.APIKey, cfg.Model, cfg.Provider)
+
+	// Wire in OAuth credentials for the active provider
+	providerName := llmClient.ProviderName()
+	// Google Gemini uses "openai" provider but OAuth is stored as "google"
+	oauthKey := providerName
+	if strings.Contains(cfg.APIBaseURL, "googleapis.com") {
+		oauthKey = "google"
+	}
+	if creds, ok := oauthStore[oauthKey]; ok && creds != nil {
+		llmClient.SetOAuthCredentials(creds)
+	} else if creds, ok := oauthStore[providerName]; ok && creds != nil {
+		llmClient.SetOAuthCredentials(creds)
+	}
+
+	// Wire in reasoning effort from config
+	if cfg.ReasoningEffort != "" {
+		llmClient.SetReasoningEffort(cfg.ReasoningEffort)
+	}
 
 	// Configure fallback models if specified
 	if len(cfg.FallbackModels) > 0 {
@@ -883,6 +908,142 @@ func (a *Agent) SaveConfig() error {
 	return a.config.Save(configPath)
 }
 
+// SwitchModel changes the active provider, base URL, API key, and model.
+// It recreates the LLM client and saves the configuration.
+// On save failure, all changes are rolled back to maintain consistency.
+func (a *Agent) SwitchModel(provider, baseURL, apiKey, model, reasoningEffort string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("model name cannot be empty")
+	}
+
+	// Save originals for rollback
+	origProvider := a.config.Provider
+	origURL := a.config.APIBaseURL
+	origKey := a.config.APIKey
+	origModel := a.config.Model
+	origEffort := a.config.ReasoningEffort
+	origLLM := a.llm
+
+	a.config.Provider = provider
+	a.config.APIBaseURL = baseURL
+	a.config.APIKey = apiKey
+	a.config.Model = model
+	a.config.ReasoningEffort = reasoningEffort
+	a.llm = llm.NewClientWithProvider(baseURL, apiKey, model, provider)
+
+	// Load OAuth credentials for the new provider
+	oauthStore, _ := config.LoadAllOAuth()
+	newProviderName := a.llm.ProviderName()
+	// Google Gemini uses "openai" provider but OAuth is stored as "google"
+	oauthKey := newProviderName
+	if strings.Contains(baseURL, "googleapis.com") {
+		oauthKey = "google"
+	}
+	if creds, ok := oauthStore[oauthKey]; ok && creds != nil {
+		a.llm.SetOAuthCredentials(creds)
+	} else if creds, ok := oauthStore[newProviderName]; ok && creds != nil {
+		a.llm.SetOAuthCredentials(creds)
+	}
+	if reasoningEffort != "" {
+		a.llm.SetReasoningEffort(reasoningEffort)
+	}
+	if len(a.config.FallbackModels) > 0 {
+		a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)
+	}
+
+	if err := a.SaveConfig(); err != nil {
+		// Rollback on save failure
+		a.config.Provider = origProvider
+		a.config.APIBaseURL = origURL
+		a.config.APIKey = origKey
+		a.config.Model = origModel
+		a.config.ReasoningEffort = origEffort
+		a.llm = origLLM
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	a.logger.Info("Model switched: provider=%s model=%s url=%s effort=%s", provider, model, baseURL, reasoningEffort)
+	return nil
+}
+
+// LoginOAuth exchanges an authorization code for OAuth tokens and configures the client.
+// provider should be "anthropic" or "openai".
+func (a *Agent) LoginOAuth(provider, authCode, verifier string) error {
+	var creds *config.OAuthCredentials
+	var err error
+
+	switch provider {
+	case "anthropic":
+		creds, err = llm.ExchangeCode(authCode, verifier)
+	case "openai":
+		creds, err = llm.ExchangeOpenAICode(authCode, verifier)
+	case "google":
+		creds, err = llm.ExchangeGoogleCode(authCode, verifier)
+	default:
+		return fmt.Errorf("unsupported OAuth provider: %s", provider)
+	}
+
+	if err != nil {
+		return fmt.Errorf("OAuth token exchange failed: %w", err)
+	}
+
+	// Save to disk (merges into store, preserving other providers)
+	if err := config.SaveOAuth(creds); err != nil {
+		return fmt.Errorf("failed to save OAuth credentials: %w", err)
+	}
+
+	// Wire into current LLM client
+	a.llm.SetOAuthCredentials(creds)
+
+	a.logger.Info("OAuth login (%s) successful, token expires in %v", provider, creds.ExpiresIn())
+	return nil
+}
+
+// HasOAuth returns true if the agent has active OAuth credentials for current provider.
+func (a *Agent) HasOAuth() bool {
+	creds := a.llm.GetOAuthCredentials()
+	return creds != nil && creds.AccessToken != ""
+}
+
+// HasOAuthFor returns true if stored OAuth credentials exist for the given provider.
+func (a *Agent) HasOAuthFor(provider string) bool {
+	store, err := config.LoadAllOAuth()
+	if err != nil || store == nil {
+		return false
+	}
+	creds := store[provider]
+	return creds != nil && creds.AccessToken != "" && !creds.IsExpired()
+}
+
+// GetOAuthExpiry returns the OAuth token expiry info for current provider.
+func (a *Agent) GetOAuthExpiry() string {
+	creds := a.llm.GetOAuthCredentials()
+	if creds == nil {
+		return "no OAuth credentials"
+	}
+	if creds.IsExpired() {
+		return "expired"
+	}
+	return fmt.Sprintf("expires in %v", creds.ExpiresIn().Round(time.Minute))
+}
+
+// GetOAuthExpiryFor returns the OAuth token expiry info for a specific provider.
+func (a *Agent) GetOAuthExpiryFor(provider string) string {
+	store, err := config.LoadAllOAuth()
+	if err != nil || store == nil {
+		return ""
+	}
+	creds := store[provider]
+	if creds == nil {
+		return ""
+	}
+	if creds.IsExpired() {
+		return "expired"
+	}
+	return fmt.Sprintf("expires in %v", creds.ExpiresIn().Round(time.Minute))
+}
+
 // ReloadProject reloads the project context, rules, and skills
 func (a *Agent) ReloadProject() error {
 	a.rules.LoadRules()
@@ -1055,23 +1216,18 @@ The AGI has full access to the project and can execute tools as configured in pe
 							parts := strings.Fields(command)
 							if len(parts) == 1 {
 								// Show current model
-								msg := fmt.Sprintf("🤖 *Current Model*\n\n*Primary:* `%s`", a.config.Model)
+								msg := fmt.Sprintf("🤖 *Current Model*\n\n*Provider:* `%s`\n*Primary:* `%s`\n*Base URL:* `%s`", a.config.Provider, a.config.Model, a.config.APIBaseURL)
 								if len(a.config.FallbackModels) > 0 {
 									msg += fmt.Sprintf("\n*Fallbacks:* `%s`", strings.Join(a.config.FallbackModels, "`, `"))
 								}
 								a.tgBot.SendMessage(msg)
 							} else if len(parts) == 2 {
-								// Change model
 								newModel := parts[1]
-								a.config.Model = newModel
-								a.llm = llm.NewClient(a.config.APIBaseURL, a.config.APIKey, newModel)
-								if len(a.config.FallbackModels) > 0 {
-									a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)
+								if err := a.SwitchModel(a.config.Provider, a.config.APIBaseURL, a.config.APIKey, newModel, a.config.ReasoningEffort); err != nil {
+									a.tgBot.SendMessage(fmt.Sprintf("❌ Failed to switch model: %v", err))
+								} else {
+									a.tgBot.SendMessage(fmt.Sprintf("✅ *Model changed to:* `%s`", newModel))
 								}
-								if err := a.config.Save(filepath.Join(a.appPath, ".agi", "config.json")); err != nil {
-									a.logger.Error("Failed to save config: %v", err)
-								}
-								a.tgBot.SendMessage(fmt.Sprintf("✅ *Model changed to:* `%s`", newModel))
 							} else {
 								a.tgBot.SendMessage("❌ *Usage:* `/model` or `/model <model-name>`")
 							}
@@ -1095,7 +1251,13 @@ The AGI has full access to the project and can execute tools as configured in pe
 								a.config = newConfig
 
 								// Recreate LLM client with new settings
-								a.llm = llm.NewClient(a.config.APIBaseURL, a.config.APIKey, a.config.Model)
+								a.llm = llm.NewClientWithProvider(a.config.APIBaseURL, a.config.APIKey, a.config.Model, a.config.Provider)
+								// Re-attach OAuth credentials for the active provider
+								if oauthStore, _ := config.LoadAllOAuth(); oauthStore != nil {
+									if creds, ok := oauthStore[a.llm.ProviderName()]; ok && creds != nil {
+										a.llm.SetOAuthCredentials(creds)
+									}
+								}
 								if len(a.config.FallbackModels) > 0 {
 									a.llm.SetFallbackModels(a.config.FallbackModels, a.config.FallbackTimeout)
 								}

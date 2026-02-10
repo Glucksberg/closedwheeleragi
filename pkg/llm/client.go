@@ -1,16 +1,15 @@
-// Package llm provides the OpenAI-compatible LLM client.
+// Package llm provides multi-provider LLM client support.
 package llm
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
+	"ClosedWheeler/pkg/config"
 	"ClosedWheeler/pkg/utils"
 )
 
@@ -19,6 +18,7 @@ type Client struct {
 	baseURL         string
 	apiKey          string
 	model           string
+	provider        Provider
 	fallbackModels  []string
 	fallbackTimeout time.Duration
 	httpClient      *http.Client
@@ -66,8 +66,9 @@ type ChatRequest struct {
 	ToolChoice  interface{}      `json:"tool_choice,omitempty"`
 	Temperature *float64         `json:"temperature,omitempty"`
 	TopP        *float64         `json:"top_p,omitempty"`
-	MaxTokens   *int             `json:"max_tokens,omitempty"`
-	Stream      bool             `json:"stream,omitempty"`
+	MaxTokens       *int             `json:"max_tokens,omitempty"`
+	Stream          bool             `json:"stream,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 }
 
 // ChatResponse represents a chat completion response
@@ -103,12 +104,19 @@ type RateLimits struct {
 	ResetTokens       time.Time `json:"reset_tokens"`
 }
 
-// NewClient creates a new LLM client
+// NewClient creates a new LLM client with auto-detected provider (backward compatible).
 func NewClient(baseURL, apiKey, model string) *Client {
+	return NewClientWithProvider(baseURL, apiKey, model, "")
+}
+
+// NewClientWithProvider creates a new LLM client with an explicit provider name.
+// An empty providerName triggers auto-detection based on model name and API key.
+func NewClientWithProvider(baseURL, apiKey, model, providerName string) *Client {
 	return &Client{
 		baseURL:         baseURL,
 		apiKey:          apiKey,
 		model:           model,
+		provider:        DetectProvider(providerName, model, apiKey),
 		fallbackModels:  []string{},
 		fallbackTimeout: 30 * time.Second,
 		httpClient: &http.Client{
@@ -117,11 +125,70 @@ func NewClient(baseURL, apiKey, model string) *Client {
 	}
 }
 
+// ProviderName returns the name of the active provider.
+func (c *Client) ProviderName() string {
+	return c.provider.Name()
+}
+
 // SetFallbackModels configures fallback models and timeout
 func (c *Client) SetFallbackModels(models []string, timeoutSeconds int) {
 	c.fallbackModels = models
 	if timeoutSeconds > 0 {
 		c.fallbackTimeout = time.Duration(timeoutSeconds) * time.Second
+	}
+}
+
+// SetOAuthCredentials sets OAuth credentials on the underlying provider.
+// Supports both Anthropic and OpenAI providers.
+func (c *Client) SetOAuthCredentials(creds *config.OAuthCredentials) {
+	switch p := c.provider.(type) {
+	case *AnthropicProvider:
+		p.SetOAuth(creds)
+	case *OpenAIProvider:
+		p.SetOAuth(creds)
+	}
+}
+
+// GetOAuthCredentials returns the current OAuth credentials from the provider.
+func (c *Client) GetOAuthCredentials() *config.OAuthCredentials {
+	switch p := c.provider.(type) {
+	case *AnthropicProvider:
+		return p.GetOAuth()
+	case *OpenAIProvider:
+		return p.GetOAuth()
+	}
+	return nil
+}
+
+// SetReasoningEffort sets the reasoning effort level on the provider.
+func (c *Client) SetReasoningEffort(effort string) {
+	switch p := c.provider.(type) {
+	case *OpenAIProvider:
+		p.SetReasoningEffort(effort)
+	case *AnthropicProvider:
+		p.SetReasoningEffort(effort)
+	}
+}
+
+// GetReasoningEffort returns the current reasoning effort level.
+func (c *Client) GetReasoningEffort() string {
+	switch p := c.provider.(type) {
+	case *OpenAIProvider:
+		return p.GetReasoningEffort()
+	case *AnthropicProvider:
+		return p.GetReasoningEffort()
+	}
+	return ""
+}
+
+// RefreshOAuthIfNeeded refreshes OAuth token if it's close to expiry.
+// Called once before the request loop, not inside SetHeaders.
+func (c *Client) RefreshOAuthIfNeeded() {
+	switch p := c.provider.(type) {
+	case *AnthropicProvider:
+		p.RefreshIfNeeded()
+	case *OpenAIProvider:
+		p.RefreshIfNeeded()
 	}
 }
 
@@ -171,21 +238,10 @@ func (c *Client) chatWithFallback(messages []Message, tools []ToolDefinition, te
 
 // chatWithModel attempts to chat with a specific model, with optional timeout
 func (c *Client) chatWithModel(model string, messages []Message, tools []ToolDefinition, temperature *float64, topP *float64, maxTokens *int, timeout time.Duration) (*ChatResponse, error) {
-	reqBody := ChatRequest{
-		Model:       model,
-		Messages:    messages,
-		Tools:       tools,
-		Temperature: temperature,
-		TopP:        topP,
-		MaxTokens:   maxTokens,
-	}
+	// Refresh OAuth token before the request (no-op if not using OAuth)
+	c.RefreshOAuthIfNeeded()
 
-	// If tools are provided, allow the model to choose
-	if len(tools) > 0 {
-		reqBody.ToolChoice = "auto"
-	}
-
-	jsonData, err := json.Marshal(reqBody)
+	jsonData, err := c.provider.BuildRequestBody(model, messages, tools, temperature, topP, maxTokens, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -198,15 +254,14 @@ func (c *Client) chatWithModel(model string, messages []Message, tools []ToolDef
 		}
 	}
 
-	var chatResp ChatResponse
+	var chatResp *ChatResponse
 	operation := func() error {
-		req, err := http.NewRequest("POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+		req, err := http.NewRequest("POST", c.provider.Endpoint(c.baseURL), bytes.NewBuffer(jsonData))
 		if err != nil {
 			return fmt.Errorf("failed to create request: %w", err)
 		}
 
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		c.provider.SetHeaders(req, c.apiKey)
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -222,17 +277,19 @@ func (c *Client) chatWithModel(model string, messages []Message, tools []ToolDef
 		if resp.StatusCode != http.StatusOK {
 			apiErr := fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
 			if utils.IsRetryableError(resp.StatusCode) {
-				return apiErr // Retryable
+				return apiErr
 			}
-			return apiErr // Not inherently retryable by utils, but we'll let ExecuteWithRetry handle MaxRetries
+			return apiErr
 		}
 
-		if err := json.Unmarshal(body, &chatResp); err != nil {
-			return fmt.Errorf("failed to unmarshal response: %w", err)
+		parsed, err := c.provider.ParseResponseBody(body)
+		if err != nil {
+			return err
 		}
+		chatResp = parsed
 
 		// Parse rate limits from headers
-		chatResp.RateLimits = parseRateLimits(resp.Header)
+		chatResp.RateLimits = c.provider.ParseRateLimits(resp.Header)
 
 		return nil
 	}
@@ -242,7 +299,7 @@ func (c *Client) chatWithModel(model string, messages []Message, tools []ToolDef
 		return nil, err
 	}
 
-	return &chatResp, nil
+	return chatResp, nil
 }
 
 // SimpleQuery sends a simple chat query (no tools)
@@ -312,43 +369,6 @@ func (c *Client) GetContent(resp *ChatResponse) string {
 		return ""
 	}
 	return resp.Choices[0].Message.Content
-}
-
-// parseRateLimits extracts rate limit info from HTTP headers
-func parseRateLimits(h http.Header) RateLimits {
-	rl := RateLimits{}
-	if v := h.Get("x-ratelimit-remaining-requests"); v != "" {
-		val, err := strconv.Atoi(v)
-		if err != nil {
-			log.Printf("[WARN] Failed to parse x-ratelimit-remaining-requests: %v (value: %s)", err, v)
-		} else {
-			rl.RemainingRequests = val
-		}
-	}
-	if v := h.Get("x-ratelimit-remaining-tokens"); v != "" {
-		val, err := strconv.Atoi(v)
-		if err != nil {
-			log.Printf("[WARN] Failed to parse x-ratelimit-remaining-tokens: %v (value: %s)", err, v)
-		} else {
-			rl.RemainingTokens = val
-		}
-	}
-	// OpenAI and many providers use durations (e.g. "6s", "100ms") for resets
-	if v := h.Get("x-ratelimit-reset-requests"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			rl.ResetRequests = time.Now().Add(d)
-		} else {
-			log.Printf("[WARN] Failed to parse x-ratelimit-reset-requests: %v (value: %s)", err, v)
-		}
-	}
-	if v := h.Get("x-ratelimit-reset-tokens"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			rl.ResetTokens = time.Now().Add(d)
-		} else {
-			log.Printf("[WARN] Failed to parse x-ratelimit-reset-tokens: %v (value: %s)", err, v)
-		}
-	}
-	return rl
 }
 
 // ToolsToDefinitions converts tool registry format to LLM format

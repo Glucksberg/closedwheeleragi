@@ -3,6 +3,7 @@
 # Configuration files with secrets
 .agi/config.json
 .agi/memory.json
+.agi/oauth.json
 .agi/backups/
 .claude/settings.local.json
 browsers/
@@ -17,6 +18,9 @@ browsers/
 logs/
 .agi/logs/
 .agi/audit.log
+
+# Private docs
+ccbypass.md
 
 # Build artifacts
 ClosedWheeler

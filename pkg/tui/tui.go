@@ -2,7 +2,11 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -10,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -162,6 +167,27 @@ type Model struct {
 	showTimestamps bool
 	status         string
 	verbose        bool
+
+	// Model picker state
+	pickerActive   bool
+	pickerStep     int
+	pickerCursor   int
+	pickerSelected ProviderOption
+	pickerInput    textinput.Model
+	pickerNewKey   string
+	pickerNewURL   string
+	pickerModelID  string // selected model ID (for effort step)
+
+	// OAuth login state
+	loginActive   bool
+	loginStep     int
+	loginCursor   int
+	loginProvider string
+	loginVerifier string
+	loginAuthURL  string
+	loginInput    textinput.Model
+	loginCancel    context.CancelFunc
+	loginClipboard bool
 }
 
 // NewModel creates a new TUI model
@@ -211,10 +237,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		m.agent.GetLogger().Info("TUI Key pressed: %s", msg.String())
+		// Quit keys — checked first, always active regardless of state
 		switch msg.Type {
-		case tea.KeyCtrlC:
-			m.agent.GetLogger().Info("TUI received quit key: %s", msg.String())
+		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyCtrlBackslash:
+			return m, tea.Quit
+		}
+
+		// Model picker intercepts all keys when active
+		if m.pickerActive {
+			updated, cmd := m.pickerUpdate(msg)
+			return updated, cmd
+		}
+
+		// Login mode intercepts all keys when active
+		if m.loginActive {
+			return m.loginUpdate(msg)
+		}
+
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 
 		case tea.KeyEnter:
@@ -279,6 +320,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.updateViewport()
 		}
+		return m, nil
+
+	case oauthExchangeMsg:
+		// OAuth callback completed (async) — OpenAI or Google
+		m.closeLogin()
+		if msg.err != nil {
+			m.messages = append(m.messages, Message{
+				Role:      "error",
+				Content:   fmt.Sprintf("%s OAuth login failed: %v", msg.provider, msg.err),
+				Timestamp: time.Now(),
+			})
+		} else {
+			labels := map[string]string{"openai": "OpenAI", "google": "Google Gemini"}
+			providerLabel := labels[msg.provider]
+			if providerLabel == "" {
+				providerLabel = msg.provider
+			}
+			m.messages = append(m.messages, Message{
+				Role:      "system",
+				Content:   fmt.Sprintf("%s OAuth login successful! You can now use %s models.", providerLabel, providerLabel),
+				Timestamp: time.Now(),
+			})
+		}
+		m.updateViewport()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -353,6 +418,30 @@ func (m Model) View() string {
 		return m.spinner.View() + " Initializing..."
 	}
 
+	// Model picker overlay
+	if m.pickerActive {
+		var sb strings.Builder
+		header := headerStyle.Render("🤖 Coder AGI")
+		sb.WriteString(header)
+		sb.WriteString("\n")
+		sb.WriteString(m.renderStatusBar())
+		sb.WriteString("\n")
+		sb.WriteString(m.pickerView())
+		return sb.String()
+	}
+
+	// Login overlay
+	if m.loginActive {
+		var sb strings.Builder
+		header := headerStyle.Render("🤖 Coder AGI")
+		sb.WriteString(header)
+		sb.WriteString("\n")
+		sb.WriteString(m.renderStatusBar())
+		sb.WriteString("\n")
+		sb.WriteString(m.loginView())
+		return sb.String()
+	}
+
 	var sb strings.Builder
 
 	// Header
@@ -399,7 +488,7 @@ func (m Model) View() string {
 	sb.WriteString("\n")
 
 	// Help bar
-	help := helpStyle.Render("Enter: Send │ /help: Commands │ Ctrl+C: Quit")
+	help := helpStyle.Render("Enter: Send │ /help: Commands │ /login: OAuth │ /model: Switch │ Ctrl+C/D: Quit")
 	sb.WriteString(help)
 
 	return sb.String()
@@ -443,8 +532,11 @@ func (m Model) renderStatusBar() string {
 	mem := memStatsStyle.Render(fmt.Sprintf("%s STM: %d │ WM: %d │ LTM: %d%s",
 		contextIndicator, stats["short_term"], stats["working"], stats["long_term"], contextInfo)) + verboseStr
 
-	// Active Agent
-	agentInfo := lipgloss.NewStyle().Foreground(secondaryColor).Bold(true).Render("🦅 ClosedWheelerAGI v2.0")
+	// Active Agent + Model
+	modelName := m.agent.Config().Model
+	agentInfo := lipgloss.NewStyle().Foreground(secondaryColor).Bold(true).Render("🦅 ClosedWheelerAGI") +
+		lipgloss.NewStyle().Foreground(textSecondary).Render(" │ ") +
+		lipgloss.NewStyle().Foreground(accentColor).Render(modelName)
 
 	// Token Usage with session info
 	usage := m.agent.GetUsageStats()
@@ -481,6 +573,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			Role: "system",
 			Content: `📚 Commands:
   /help, /h     - Show this help
+  /login        - OAuth login (Anthropic, OpenAI)
+  /model        - Switch provider & model (interactive)
+  /model <name> - Quick switch to a model
   /clear, /c    - Clear conversation
   /status, /s   - Show project status
   /reload, /r   - Reload project files
@@ -612,6 +707,34 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			Content:   "📋 Recent Logs:\n" + logs,
 			Timestamp: time.Now(),
 		})
+
+	case "/model", "/m":
+		if len(parts) > 1 {
+			// Quick switch: /model <model-name>
+			newModel := parts[1]
+			cfg := m.agent.Config()
+			if err := m.agent.SwitchModel(cfg.Provider, cfg.APIBaseURL, cfg.APIKey, newModel, cfg.ReasoningEffort); err != nil {
+				m.messages = append(m.messages, Message{
+					Role:      "error",
+					Content:   fmt.Sprintf("Failed to switch model: %v", err),
+					Timestamp: time.Now(),
+				})
+			} else {
+				m.messages = append(m.messages, Message{
+					Role:      "system",
+					Content:   fmt.Sprintf("Model switched to: %s", newModel),
+					Timestamp: time.Now(),
+				})
+			}
+		} else {
+			// Interactive picker
+			m.initPicker()
+			return m, textinput.Blink
+		}
+
+	case "/login":
+		m.initLogin()
+		return m, nil
 
 	case "/exit", "/q":
 		return m, tea.Quit
@@ -788,13 +911,62 @@ type statusUpdateMsg struct {
 	status string
 }
 
-// Run starts the TUI
-func Run(ag *agent.Agent) error {
-	p := tea.NewProgram(
-		NewModel(ag),
+// quitKeyFilter is a program-level filter that catches quit keys
+// even if the model's Update somehow doesn't process them.
+// It counts consecutive Ctrl+C presses and force-exits on the third.
+func quitKeyFilter() func(tea.Model, tea.Msg) tea.Msg {
+	ctrlCCount := 0
+	return func(m tea.Model, msg tea.Msg) tea.Msg {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.Type {
+			case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyCtrlBackslash:
+				ctrlCCount++
+				if ctrlCCount >= 3 {
+					// Nuclear option: force exit after 3 attempts
+					fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
+					fmt.Print("\033[?25h\033[?1049l")
+					fmt.Fprintln(os.Stderr, "\nForce quit.")
+					os.Exit(1)
+				}
+			default:
+				ctrlCCount = 0
+			}
+		}
+		return msg
+	}
+}
+
+// NOTE: loginUpdate() and loginView() are now in login_picker.go
+
+// openBrowser attempts to open a URL in the default browser.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return
+	}
+	if err := cmd.Start(); err == nil {
+		go func() { _ = cmd.Wait() }() // Reap process
+	}
+}
+
+// Run starts the TUI with an optional context for cancellation.
+func Run(ag *agent.Agent, ctx ...context.Context) error {
+	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+		tea.WithFilter(quitKeyFilter()),
+	}
+	if len(ctx) > 0 && ctx[0] != nil {
+		opts = append(opts, tea.WithContext(ctx[0]))
+	}
+
+	p := tea.NewProgram(NewModel(ag), opts...)
 
 	// Set status callback
 	ag.SetStatusCallback(func(s string) {
@@ -802,5 +974,9 @@ func Run(ag *agent.Agent) error {
 	})
 
 	_, err := p.Run()
+
+	// Clear status callback to prevent sends after program exits
+	ag.SetStatusCallback(nil)
+
 	return err
 }
